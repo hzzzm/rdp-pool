@@ -13,6 +13,7 @@ import (
 	"github.com/hzzzm/rdp-pool/server/internal/config"
 	"github.com/hzzzm/rdp-pool/server/internal/domain"
 	"github.com/hzzzm/rdp-pool/server/internal/store"
+	"github.com/hzzzm/rdp-pool/server/internal/vault"
 )
 
 var (
@@ -187,16 +188,28 @@ func (s *PoolService) Acquire(ctx context.Context, userID, groupID, clientInstan
 		State: domain.SessionPending, LeaseExpiresAt: &lease, OccupationDeadlineAt: &occ,
 		ClientInstanceID: clientInstanceID, CreatedAt: now,
 	}
-	ticket := &domain.RDPTicket{
-		TicketID: newID("tkt"),
-		Host:     host,
-		Port:     port,
-		Username: "SEE_VAULT",
-		Password: "",
-	}
+	ticket, _ := s.issueTicket(ctx, sessionID, resourceID, host, port)
 	meta, _ := json.Marshal(map[string]any{"resource_id": resourceID})
 	_ = s.Store.InsertAudit(ctx, "pool_user", userID, "acquire_allocated", "session", sessionID, "", meta)
 	return &AcquireResult{Status: "allocated", Session: sess, RDPTicket: ticket}, nil
+}
+
+func (s *PoolService) issueTicket(ctx context.Context, sessionID, resourceID, host string, port int) (*domain.RDPTicket, error) {
+	tkt := &domain.RDPTicket{TicketID: newID("tkt"), Host: host, Port: port}
+	var blob []byte
+	err := s.Store.DB.QueryRowContext(ctx, `SELECT ciphertext FROM resource_secrets WHERE resource_id = ?`, resourceID).Scan(&blob)
+	if err == nil && len(blob) > 0 {
+		sec, derr := vault.DecryptRDPSecret([]byte(s.Cfg.CredentialAESKey), blob)
+		if derr == nil && sec != nil {
+			tkt.Username = sec.Username
+			tkt.Password = sec.Password
+		}
+	}
+	_, _ = s.Store.DB.ExecContext(ctx, `
+		INSERT INTO rdp_tickets (id, session_id, expires_at, created_at)
+		VALUES (?, ?, DATE_ADD(NOW(3), INTERVAL ? SECOND), NOW(3))`,
+		tkt.TicketID, sessionID, int(s.Cfg.TicketTTL.Seconds()))
+	return tkt, nil
 }
 
 func (s *PoolService) issueTicketStub(ctx context.Context, sess *domain.Session) (*domain.RDPTicket, error) {
@@ -206,7 +219,7 @@ func (s *PoolService) issueTicketStub(ctx context.Context, sess *domain.Session)
 	if err != nil {
 		return nil, err
 	}
-	return &domain.RDPTicket{TicketID: newID("tkt"), Host: host, Port: port, Username: "SEE_VAULT"}, nil
+	return s.issueTicket(ctx, sess.ID, sess.ResourceID, host, port)
 }
 
 func (s *PoolService) Heartbeat(ctx context.Context, userID, sessionID string, rdpConnected bool) (*domain.Session, error) {

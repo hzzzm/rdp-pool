@@ -15,6 +15,11 @@ type MySQL struct {
 }
 
 func OpenMySQL(dsn string) (*MySQL, error) {
+	return OpenMySQLRetry(dsn, 30, time.Second)
+}
+
+// OpenMySQLRetry pings with backoff so compose/Docker Desktop startup races are tolerated.
+func OpenMySQLRetry(dsn string, attempts int, delay time.Duration) (*MySQL, error) {
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return nil, err
@@ -22,13 +27,19 @@ func OpenMySQL(dsn string) (*MySQL, error) {
 	db.SetMaxOpenConns(20)
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(30 * time.Minute)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := db.PingContext(ctx); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("mysql ping: %w", err)
+
+	var last error
+	for i := 1; i <= attempts; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		last = db.PingContext(ctx)
+		cancel()
+		if last == nil {
+			return &MySQL{DB: db}, nil
+		}
+		time.Sleep(delay)
 	}
-	return &MySQL{DB: db}, nil
+	_ = db.Close()
+	return nil, fmt.Errorf("mysql ping after %d attempts: %w", attempts, last)
 }
 
 func (m *MySQL) Close() error {
