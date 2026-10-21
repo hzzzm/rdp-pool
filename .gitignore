@@ -1,0 +1,49 @@
+# Secrets & local env
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.p12
+credentials*.json
+secrets/
+
+# Never commit internal project copies
+internal/
+**/internal-credentials/
+
+# Go
+server/bin/
+server/dist/
+*.exe
+*.test
+*.out
+vendor/
+
+# Node / RuoYi frontend local
+node_modules/
+dist/
+.npm/
+*.log
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Build / client
+client/**/bin/
+client/**/obj/
+client/**/*.user
+client/**/*.suo
+
+# Docker volumes / data
+deploy/data/
+mysql-data/
+redis-data/
+
+# Coverage
+coverage.out
+coverage.html
