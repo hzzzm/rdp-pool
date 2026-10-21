@@ -17,10 +17,11 @@ services:
       - mysql_data:/var/lib/mysql
     command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci", "--default-authentication-plugin=caching_sha2_password"]
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-root_pass_change_me}"]
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD || exit 1"]
       interval: 5s
       timeout: 5s
-      retries: 20
+      retries: 30
+      start_period: 20s
 
   redis:
     image: redis:7-alpine
@@ -38,6 +39,7 @@ services:
       context: ../server
       dockerfile: Dockerfile
     container_name: rdp-go-api
+    restart: unless-stopped
     environment:
       HTTP_ADDR: ":8081"
       MYSQL_DSN: "${MYSQL_RDP_USER:-rdp_app}:${MYSQL_RDP_PASSWORD:-rdp_pass}@tcp(mysql:3306)/rdp_pool?parseTime=true&loc=Local&charset=utf8mb4"
@@ -51,6 +53,37 @@ services:
       mysql:
         condition: service_healthy
       redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8081/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 40s
+
+  # One-shot seed: group + demo user + Windows resource (reads DEMO_* from .env)
+  seed:
+    build:
+      context: ../server
+      dockerfile: Dockerfile.seed
+    container_name: rdp-seed
+    profiles: ["seed"]
+    environment:
+      MYSQL_DSN: "${MYSQL_RDP_USER:-rdp_app}:${MYSQL_RDP_PASSWORD:-rdp_pass}@tcp(mysql:3306)/rdp_pool?parseTime=true&loc=Local&charset=utf8mb4"
+      CREDENTIAL_AES_KEY: ${CREDENTIAL_AES_KEY:-0123456789abcdef0123456789abcdef}
+      DEMO_GROUP_CODE: ${DEMO_GROUP_CODE:-office}
+      DEMO_GROUP_NAME: ${DEMO_GROUP_NAME:-办公桌面}
+      DEMO_RESOURCE_NAME: ${DEMO_RESOURCE_NAME:-win-test-01}
+      DEMO_RESOURCE_HOST: ${DEMO_RESOURCE_HOST:-10.126.126.4}
+      DEMO_RESOURCE_PORT: ${DEMO_RESOURCE_PORT:-3389}
+      DEMO_RDP_USERNAME: ${DEMO_RDP_USERNAME:-ciit}
+      DEMO_RDP_PASSWORD: ${DEMO_RDP_PASSWORD:-}
+      DEMO_POOL_USER: ${DEMO_POOL_USER:-demo}
+      DEMO_POOL_PASSWORD: ${DEMO_POOL_PASSWORD:-demo123}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      go-api:
         condition: service_healthy
 
   nginx:
