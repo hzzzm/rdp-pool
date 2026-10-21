@@ -8,9 +8,10 @@
 credentials*.json
 secrets/
 
-# Never commit internal project copies
-internal/
+# Never commit Project-store credential dumps if copied into repo root
+/internal/
 **/internal-credentials/
+!server/internal/
 
 # Go
 server/bin/
