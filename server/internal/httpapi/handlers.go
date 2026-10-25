@@ -400,6 +400,31 @@ func (s *Server) handleAdminPutCredentials(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+func (s *Server) handleAdminGetUserGroups(w http.ResponseWriter, r *http.Request, _ *auth.Claims) {
+	userID := r.PathValue("id")
+	rows, err := s.Store.DB.QueryContext(r.Context(), `
+		SELECT group_id FROM user_group_grants WHERE user_id = ? ORDER BY group_id`, userID)
+	if err != nil {
+		mapSvcErr(w, err)
+		return
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var gid string
+		if err := rows.Scan(&gid); err != nil {
+			mapSvcErr(w, err)
+			return
+		}
+		ids = append(ids, gid)
+	}
+	if err := rows.Err(); err != nil {
+		mapSvcErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"group_ids": ids})
+}
+
 func (s *Server) handleAdminGrantGroups(w http.ResponseWriter, r *http.Request, claims *auth.Claims) {
 	userID := r.PathValue("id")
 	var body struct {
@@ -408,6 +433,9 @@ func (s *Server) handleAdminGrantGroups(w http.ResponseWriter, r *http.Request, 
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json")
 		return
+	}
+	if body.GroupIDs == nil {
+		body.GroupIDs = []string{}
 	}
 	tx, err := s.Store.DB.BeginTx(r.Context(), nil)
 	if err != nil {

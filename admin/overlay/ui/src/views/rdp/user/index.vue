@@ -36,11 +36,13 @@
     </el-dialog>
 
     <el-dialog title="用户↔组授权" v-model="grantVisible" width="480px" append-to-body>
-      <el-checkbox-group v-model="grantIds">
-        <el-checkbox v-for="g in groups" :key="g.ID" :label="g.ID">{{ g.Name }} ({{ g.Code }})</el-checkbox>
-      </el-checkbox-group>
+      <div v-loading="grantLoading">
+        <el-checkbox-group v-model="grantIds">
+          <el-checkbox v-for="g in groups" :key="g.ID" :label="g.ID">{{ g.Name }} ({{ g.Code }})</el-checkbox>
+        </el-checkbox-group>
+      </div>
       <template #footer>
-        <el-button type="primary" @click="submitGrant">保存</el-button>
+        <el-button type="primary" :disabled="grantLoading" @click="submitGrant">保存</el-button>
         <el-button @click="grantVisible = false">取消</el-button>
       </template>
     </el-dialog>
@@ -48,7 +50,7 @@
 </template>
 
 <script setup name="RdpUser">
-import { listPoolUsers, createPoolUser, grantUserGroups } from '@/api/rdp/user'
+import { listPoolUsers, createPoolUser, getUserGroups, grantUserGroups } from '@/api/rdp/user'
 import { listGroups } from '@/api/rdp/group'
 import { ElMessage } from 'element-plus'
 
@@ -57,6 +59,7 @@ const list = ref([])
 const groups = ref([])
 const createVisible = ref(false)
 const grantVisible = ref(false)
+const grantLoading = ref(false)
 const createForm = reactive({ login: '', password: '', display_name: '' })
 const grantUserId = ref('')
 const grantIds = ref([])
@@ -90,10 +93,20 @@ async function submitCreate() {
   load()
 }
 
-function openGrant(row) {
+async function openGrant(row) {
   grantUserId.value = row.ID
   grantIds.value = []
   grantVisible.value = true
+  grantLoading.value = true
+  try {
+    if (!groups.value.length) await loadGroups()
+    const data = await getUserGroups(row.ID)
+    grantIds.value = Array.isArray(data.group_ids) ? [...data.group_ids] : []
+  } catch (e) {
+    grantIds.value = []
+  } finally {
+    grantLoading.value = false
+  }
 }
 
 async function submitGrant() {

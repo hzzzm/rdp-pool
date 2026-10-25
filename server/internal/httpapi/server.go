@@ -54,6 +54,7 @@ func (s *Server) routes() {
 	s.Mux.HandleFunc("POST /api/v1/admin/resources/{id}/soft-release", s.withAdmin(s.handleAdminSoftRelease))
 	s.Mux.HandleFunc("GET /api/v1/admin/pool-users", s.withAdmin(s.handleAdminListUsers))
 	s.Mux.HandleFunc("POST /api/v1/admin/pool-users", s.withAdmin(s.handleAdminCreateUser))
+	s.Mux.HandleFunc("GET /api/v1/admin/pool-users/{id}/groups", s.withAdmin(s.handleAdminGetUserGroups))
 	s.Mux.HandleFunc("PUT /api/v1/admin/pool-users/{id}/groups", s.withAdmin(s.handleAdminGrantGroups))
 	s.Mux.HandleFunc("PUT /api/v1/admin/resources/{id}/credentials", s.withAdmin(s.handleAdminPutCredentials))
 	s.Mux.HandleFunc("GET /api/v1/admin/sessions", s.withAdmin(s.handleAdminListSessions))
