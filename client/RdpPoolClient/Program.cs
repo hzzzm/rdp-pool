@@ -6,14 +6,39 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using System.Windows.Forms;
 using RdpPool.Config;
+
+// WinExe：日志进文件；致命错误弹窗（启动器也会把 stdout/stderr 写入 rdp-pool-client.log）
+var logPath = Path.Combine(AppContext.BaseDirectory, "rdp-pool-client.log");
+try
+{
+    var log = new StreamWriter(new FileStream(logPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite), Encoding.UTF8)
+    { AutoFlush = true };
+    Console.SetOut(log);
+    Console.SetError(log);
+}
+catch { /* ignore */ }
+
+int Die(string msg)
+{
+    Console.Error.WriteLine(msg);
+    // 自动化冒烟可设 RDP_POOL_NO_UI=1，避免 MessageBox 卡住
+    if (!string.Equals(Environment.GetEnvironmentVariable("RDP_POOL_NO_UI"), "1", StringComparison.Ordinal))
+    {
+        try
+        {
+            MessageBox.Show(msg, "RDP 资源池客户端", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        catch { /* ignore */ }
+    }
+    return 1;
+}
 
 var cfgPath = args.Length > 0 ? args[0] : ClientConfigStore.DefaultPath;
 if (!File.Exists(cfgPath))
 {
-    Console.Error.WriteLine($"缺少 {cfgPath}。请先运行 RdpPoolSetup.exe 配置服务器地址与账号。");
-    Console.Error.WriteLine("开发机也可：复制 appsettings.example.json 后用 Setup 保存（勿再手写明文密码）。");
-    return 1;
+    return Die($"缺少 {cfgPath}。请先运行 RdpPoolSetup.exe 配置服务器地址与账号。");
 }
 
 ClientSettings cfg;
@@ -23,9 +48,7 @@ try
 }
 catch (Exception ex)
 {
-    Console.Error.WriteLine("读取配置失败: " + ex.Message);
-    Console.Error.WriteLine("请运行 RdpPoolSetup.exe 重新保存（DPAPI 密文仅本机当前用户可解）。");
-    return 1;
+    return Die("读取配置失败: " + ex.Message + "\n请运行 RdpPoolSetup.exe 重新保存（DPAPI 密文仅本机当前用户可解）。");
 }
 
 if (cfg.MigratedFromPlaintext)
@@ -33,8 +56,7 @@ if (cfg.MigratedFromPlaintext)
 
 if (string.IsNullOrWhiteSpace(cfg.Login) || string.IsNullOrEmpty(cfg.Password))
 {
-    Console.Error.WriteLine("配置中无有效用户名/密码。请运行 RdpPoolSetup.exe。");
-    return 1;
+    return Die("配置中无有效用户名/密码。请运行 RdpPoolSetup.exe。");
 }
 
 var jsonOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
@@ -45,8 +67,7 @@ Console.WriteLine("登录中...");
 var loginResp = await http.PostAsJsonAsync("api/v1/auth/login", new { login = cfg.Login, password = cfg.Password });
 if (!loginResp.IsSuccessStatusCode)
 {
-    Console.Error.WriteLine($"登录失败: {(int)loginResp.StatusCode} {await loginResp.Content.ReadAsStringAsync()}");
-    return 1;
+    return Die($"登录失败: {(int)loginResp.StatusCode} {await loginResp.Content.ReadAsStringAsync()}");
 }
 var login = await loginResp.Content.ReadFromJsonAsync<LoginResponse>(jsonOpts);
 http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", login!.AccessToken);
@@ -58,7 +79,7 @@ var groupsResp = await http.GetFromJsonAsync<GroupsResponse>("api/v1/groups/avai
 var groups = groupsResp?.Groups ?? new List<GroupItem>();
 if (groups.Count == 0)
 {
-    Console.Error.WriteLine("当前账号没有可用的资源组，请联系管理员授权（或先跑 seed）。");
+    Die("当前账号没有可用的资源组，请联系管理员授权（或先跑 seed）。");
     return 2;
 }
 
@@ -77,12 +98,9 @@ else
         groupId = cfg.PreferredGroupId;
     else
     {
-        Console.Write("输入序号选择组 [0]: ");
-        var line = Console.ReadLine();
-        var idx = 0;
-        _ = int.TryParse(line, out idx);
-        if (idx < 0 || idx >= groups.Count) idx = 0;
-        groupId = groups[idx].Id;
+        // WinExe 无控制台交互：默认选第一组；可在 Setup/配置里设 PreferredGroupId
+        groupId = groups[0].Id;
+        Console.WriteLine($"多组且未指定 PreferredGroupId，默认选用: {groups[0].Name}");
     }
 }
 
@@ -232,8 +250,19 @@ try
             }
             else
             {
-                Console.WriteLine("已启动 mstsc。按 Enter 释放会话并清理本地凭据...");
-                Console.ReadLine();
+                Console.WriteLine("已启动 mstsc。关闭提示框后将释放会话并清理本地凭据...");
+                try
+                {
+                    MessageBox.Show(
+                        "远程桌面已启动。\n\n关闭本对话框后将释放会话并清理本地凭据。",
+                        "RDP 资源池客户端",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                }
+                catch
+                {
+                    Thread.Sleep(60_000);
+                }
             }
             try { mstsc?.Refresh(); } catch { /* ignore */ }
         }

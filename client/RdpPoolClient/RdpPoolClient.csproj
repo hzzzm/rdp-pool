@@ -1,14 +1,19 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <OutputType>WinExe</OutputType>
     <TargetFramework>net6.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>RdpPoolClient</RootNamespace>
     <UseWindowsForms>true</UseWindowsForms>
-    <DisableWinExeOutputInference>true</DisableWinExeOutputInference>
     <AssemblyName>RdpPoolClient</AssemblyName>
     <ApplicationIcon>..\assets\app.ico</ApplicationIcon>
+    <Company>RDP Pool Lab</Company>
+    <Product>RDP Pool Client</Product>
+    <AssemblyTitle>RDP 资源池客户端</AssemblyTitle>
+    <Description>Windows RDP resource pool client</Description>
+    <Copyright>Copyright (c) RDP Pool Lab</Copyright>
+    <Version>1.0.0</Version>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\RdpPool.Config\RdpPool.Config.csproj" />

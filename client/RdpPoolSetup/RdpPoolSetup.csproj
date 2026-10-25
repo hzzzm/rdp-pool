@@ -8,6 +8,12 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ApplicationIcon>..\assets\app.ico</ApplicationIcon>
     <AssemblyName>RdpPoolSetup</AssemblyName>
+    <Company>RDP Pool Lab</Company>
+    <Product>RDP Pool Client</Product>
+    <AssemblyTitle>RDP 资源池配置</AssemblyTitle>
+    <Description>Windows RDP resource pool setup</Description>
+    <Copyright>Copyright (c) RDP Pool Lab</Copyright>
+    <Version>1.0.0</Version>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\RdpPool.Config\RdpPool.Config.csproj" />

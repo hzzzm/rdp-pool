@@ -40,6 +40,8 @@ client/**/obj/
 client/**/publish/
 client/**/*.user
 client/**/*.suo
+client/signing/*.pfx
+client/signing/pfx-password.txt
 
 # Docker volumes / data
 deploy/data/

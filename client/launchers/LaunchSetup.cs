@@ -1,9 +1,18 @@
-// netfx 薄启动器（winexe）：设置 DOTNET_ROOT 后用包内 dotnet.exe exec RdpPoolSetup.dll
+// netfx WinExe 启动器：设 DOTNET_ROOT，CreateNoWindow，无黑框
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Reflection;
 using System.Text;
 using System.Windows.Forms;
+
+[assembly: AssemblyTitle("RDP 资源池配置")]
+[assembly: AssemblyDescription("RDP Pool Setup launcher")]
+[assembly: AssemblyCompany("RDP Pool Lab")]
+[assembly: AssemblyProduct("RDP Pool Client")]
+[assembly: AssemblyCopyright("Copyright (c) RDP Pool Lab")]
+[assembly: AssemblyVersion("1.0.0.0")]
+[assembly: AssemblyFileVersion("1.0.0.0")]
 
 internal static class LaunchSetup
 {
@@ -43,7 +52,8 @@ internal static class LaunchSetup
                 FileName = dotnet,
                 Arguments = arg.ToString(),
                 WorkingDirectory = root,
-                UseShellExecute = false
+                UseShellExecute = false,
+                CreateNoWindow = true
             };
             psi.EnvironmentVariables["DOTNET_ROOT"] = dotnetRoot;
             psi.EnvironmentVariables["DOTNET_MULTILEVEL_LOOKUP"] = "0";

@@ -1,12 +1,22 @@
-// netfx 薄启动器：设置 DOTNET_ROOT 后用包内 dotnet.exe exec RdpPoolClient.dll
-// 由 pack-client-win.ps1 用 Framework csc 编译为 RdpPoolClient.exe
+// netfx WinExe 启动器：设 DOTNET_ROOT，CreateNoWindow，无黑框
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Reflection;
 using System.Text;
+using System.Windows.Forms;
+
+[assembly: AssemblyTitle("RDP 资源池客户端")]
+[assembly: AssemblyDescription("RDP Pool Client launcher")]
+[assembly: AssemblyCompany("RDP Pool Lab")]
+[assembly: AssemblyProduct("RDP Pool Client")]
+[assembly: AssemblyCopyright("Copyright (c) RDP Pool Lab")]
+[assembly: AssemblyVersion("1.0.0.0")]
+[assembly: AssemblyFileVersion("1.0.0.0")]
 
 internal static class LaunchClient
 {
+    [STAThread]
     static int Main(string[] args)
     {
         try
@@ -15,17 +25,15 @@ internal static class LaunchClient
             var dotnetRoot = Path.Combine(root, "dotnet");
             var dotnet = Path.Combine(dotnetRoot, "dotnet.exe");
             var dll = Path.Combine(root, "RdpPoolClient.dll");
+
             if (!File.Exists(dll))
             {
-                Console.Error.WriteLine("缺少 RdpPoolClient.dll，请完整解压安装包。");
-                Console.Error.WriteLine("目录: " + root);
-                Pause();
+                Fail("缺少 RdpPoolClient.dll，请完整解压安装包。\n" + root);
                 return 90;
             }
             if (!File.Exists(dotnet))
             {
-                Console.Error.WriteLine("缺少内置运行时 dotnet\\dotnet.exe，请完整解压安装包。");
-                Pause();
+                Fail("缺少内置运行时 dotnet\\dotnet.exe，请完整解压安装包。");
                 return 91;
             }
 
@@ -43,36 +51,34 @@ internal static class LaunchClient
                 FileName = dotnet,
                 Arguments = arg.ToString(),
                 WorkingDirectory = root,
-                UseShellExecute = false
+                UseShellExecute = false,
+                CreateNoWindow = true // 隐藏 dotnet.exe 控制台子系统窗口
             };
             psi.EnvironmentVariables["DOTNET_ROOT"] = dotnetRoot;
             psi.EnvironmentVariables["DOTNET_MULTILEVEL_LOOKUP"] = "0";
 
             using (var p = Process.Start(psi))
             {
-                if (p == null) return 92;
+                if (p == null)
+                {
+                    Fail("无法启动运行时进程。");
+                    return 92;
+                }
                 p.WaitForExit();
-                var code = p.ExitCode;
-                if (code != 0) Pause();
-                return code;
+                // 非 0 时主程序一般已 MessageBox；此处不重复打扰
+                return p.ExitCode;
             }
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine("启动失败: " + ex.Message);
-            Pause();
+            Fail("启动失败: " + ex.Message);
             return 93;
         }
     }
 
-    static void Pause()
+    static void Fail(string msg)
     {
-        try
-        {
-            Console.WriteLine("按 Enter 退出...");
-            Console.ReadLine();
-        }
-        catch { }
+        MessageBox.Show(msg, "RDP 资源池客户端", MessageBoxButtons.OK, MessageBoxIcon.Error);
     }
 
     static string Quote(string s)

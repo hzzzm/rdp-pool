@@ -17,6 +17,9 @@
 3. 双击 **`RdpPoolClient.exe`** 登录并分配资源（托盘会显示应用图标）  
 
 包内已带运行时，**不必安装 .NET**。无 `启动.cmd`。应用图标见 `assets/app.ico`（16/32/48/256）。
+`RdpPoolClient.exe` / `RdpPoolSetup.exe` 为 **WinExe**（无黑色 CMD）。日志：`rdp-pool-client.log`。
+
+若 Win11「智能应用控制」拦截：见 zip 内 `README.txt` 与 `install-lab-cert.ps1`（安装实验室自签证书到本机受信任根/发布者）。
 
 ### 凭据如何存放
 
