@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hzzzm/rdp-pool/server/internal/auth"
+	"github.com/hzzzm/rdp-pool/server/internal/vault"
 )
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -141,21 +142,34 @@ func (s *Server) handleTicketStub(w http.ResponseWriter, r *http.Request, claims
 }
 
 func (s *Server) handleAdminExchangeStub(w http.ResponseWriter, r *http.Request) {
-	// MVP scaffold: accept a stub ruoyi identity and issue admin_token.
-	// Production: validate RuoYi JWT (pubkey or introspection) before exchange.
+	// §2.3 dual-token: validate RuoYi (shim) JWT, then issue Go admin_token.
+	// When full Java RuoYi is online, swap parseRuoyiShimToken for Java JWT/pubkey check.
 	var body struct {
 		RuoyiToken string `json:"ruoyi_token"`
 		AdminID    string `json:"admin_id"`
 		Login      string `json:"login"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	if body.AdminID == "" {
-		body.AdminID = "admin"
+	ryTok := body.RuoyiToken
+	if ryTok == "" {
+		ryTok = r.Header.Get("X-RuoYi-Token")
 	}
-	if body.Login == "" {
-		body.Login = "admin"
+	if ryTok == "" {
+		ryTok = s.ruoyiBearer(r)
 	}
-	tok, exp, err := s.Tokens.IssueAdmin(body.AdminID, body.Login)
+	login, ok := s.parseRuoyiShimToken(ryTok)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "invalid ruoyi token")
+		return
+	}
+	if body.Login != "" {
+		login = body.Login
+	}
+	adminID := body.AdminID
+	if adminID == "" {
+		adminID = login
+	}
+	tok, exp, err := s.Tokens.IssueAdmin(adminID, login)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "token error")
 		return
@@ -163,7 +177,6 @@ func (s *Server) handleAdminExchangeStub(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"admin_token": tok,
 		"expires_at":  exp,
-		"note":        "scaffold exchange — wire RuoYi JWT validation next",
 	})
 }
 
@@ -327,6 +340,64 @@ func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request, _ 
 		list = []u{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"users": list})
+}
+
+func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request, claims *auth.Claims) {
+	var body struct {
+		Login       string `json:"login"`
+		Password    string `json:"password"`
+		DisplayName string `json:"display_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Login == "" || body.Password == "" {
+		writeErr(w, http.StatusBadRequest, "login and password required")
+		return
+	}
+	hash, err := auth.HashPassword(body.Password)
+	if err != nil {
+		mapSvcErr(w, err)
+		return
+	}
+	id := "usr_" + uuid.NewString()[:8]
+	if body.DisplayName == "" {
+		body.DisplayName = body.Login
+	}
+	_, err = s.Store.DB.ExecContext(r.Context(), `
+		INSERT INTO pool_users (id, login, password_hash, display_name, enabled, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 1, NOW(3), NOW(3))`, id, body.Login, hash, body.DisplayName)
+	if err != nil {
+		mapSvcErr(w, err)
+		return
+	}
+	_ = s.Store.InsertAudit(r.Context(), "admin", claims.UserID, "pool_user_create", "pool_user", id, "", nil)
+	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
+}
+
+func (s *Server) handleAdminPutCredentials(w http.ResponseWriter, r *http.Request, claims *auth.Claims) {
+	id := r.PathValue("id")
+	var body struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Username == "" || body.Password == "" {
+		writeErr(w, http.StatusBadRequest, "username and password required")
+		return
+	}
+	key := []byte(s.Pool.Cfg.CredentialAESKey)
+	blob, err := vault.EncryptJSON(key, vault.RDPSecret{Username: body.Username, Password: body.Password})
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "encrypt error")
+		return
+	}
+	_, err = s.Store.DB.ExecContext(r.Context(), `
+		INSERT INTO resource_secrets (resource_id, ciphertext, key_version, updated_at)
+		VALUES (?, ?, 1, NOW(3))
+		ON DUPLICATE KEY UPDATE ciphertext=VALUES(ciphertext), updated_at=NOW(3)`, id, blob)
+	if err != nil {
+		mapSvcErr(w, err)
+		return
+	}
+	_ = s.Store.InsertAudit(r.Context(), "admin", claims.UserID, "resource_credentials_put", "resource", id, "", nil)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *Server) handleAdminGrantGroups(w http.ResponseWriter, r *http.Request, claims *auth.Claims) {

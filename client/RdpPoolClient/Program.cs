@@ -32,7 +32,7 @@ http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer
 Console.WriteLine("登录成功");
 
 var groupsResp = await http.GetFromJsonAsync<GroupsResponse>("api/v1/groups/available", jsonOpts);
-var groups = groupsResp?.Groups ?? [];
+var groups = groupsResp?.Groups ?? new List<GroupItem>();
 if (groups.Count == 0)
 {
     Console.Error.WriteLine("当前账号没有可用的资源组，请联系管理员授权（或先跑 seed）。");
@@ -181,7 +181,7 @@ sealed class LoginResponse
 sealed class GroupsResponse
 {
     [JsonPropertyName("groups")]
-    public List<GroupItem> Groups { get; set; } = [];
+    public List<GroupItem> Groups { get; set; } = new();
 }
 
 sealed class GroupItem

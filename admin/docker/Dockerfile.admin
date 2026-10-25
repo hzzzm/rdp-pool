@@ -1,0 +1,31 @@
+# RuoYi-Vue Java (Spring Boot) — build from vendor/
+# Prefer already-cached maven:3.9-eclipse-temurin-17 (also used as runtime to avoid extra JRE pulls).
+FROM maven:3.9-eclipse-temurin-17 AS build
+WORKDIR /src
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ENV http_proxy=${HTTP_PROXY} https_proxy=${HTTPS_PROXY} HTTP_PROXY=${HTTP_PROXY} HTTPS_PROXY=${HTTPS_PROXY}
+
+# Aliyun Maven mirror
+RUN mkdir -p /root/.m2 && printf '%s\n' \
+  '<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0">' \
+  '  <mirrors><mirror>' \
+  '    <id>aliyun</id><mirrorOf>*</mirrorOf>' \
+  '    <url>https://maven.aliyun.com/repository/public</url>' \
+  '  </mirror></mirrors>' \
+  '</settings>' > /root/.m2/settings.xml
+
+COPY vendor/RuoYi-Vue /src
+COPY overlay/java/application.yml /src/ruoyi-admin/src/main/resources/application.yml
+COPY overlay/java/application-druid.yml /src/ruoyi-admin/src/main/resources/application-druid.yml
+
+RUN mvn -B -DskipTests package -pl ruoyi-admin -am
+
+FROM maven:3.9-eclipse-temurin-17
+WORKDIR /app
+RUN mkdir -p /home/ruoyi/uploadPath
+COPY --from=build /src/ruoyi-admin/target/ruoyi-admin.jar /app/ruoyi-admin.jar
+ENV JAVA_OPTS="-Xms256m -Xmx512m"
+EXPOSE 8080
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar /app/ruoyi-admin.jar"]
