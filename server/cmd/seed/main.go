@@ -40,7 +40,7 @@ func main() {
 	resName := getenv("DEMO_RESOURCE_NAME", "win-test-01")
 	resHost := getenv("DEMO_RESOURCE_HOST", "10.126.126.4")
 	resPort := getenv("DEMO_RESOURCE_PORT", "3389")
-	rdpUser := getenv("DEMO_RDP_USERNAME", "ciit")
+	rdpUser := getenv("DEMO_RDP_USERNAME", "zzm")
 	rdpPass := getenv("DEMO_RDP_PASSWORD", "")
 	userLogin := getenv("DEMO_POOL_USER", "demo")
 	userPass := getenv("DEMO_POOL_PASSWORD", "demo123")

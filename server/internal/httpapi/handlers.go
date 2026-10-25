@@ -134,10 +134,14 @@ func (s *Server) handleWSQueueStub(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleTicketStub(w http.ResponseWriter, r *http.Request, claims *auth.Claims) {
-	writeJSON(w, http.StatusNotImplemented, map[string]string{
-		"error": "ticket re-issue stub — credentials vault AES-GCM next",
-	})
+func (s *Server) handleTicket(w http.ResponseWriter, r *http.Request, claims *auth.Claims) {
+	id := r.PathValue("id")
+	tkt, err := s.Pool.IssueSessionTicket(r.Context(), claims.UserID, id)
+	if err != nil {
+		mapSvcErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"rdp_ticket": tkt})
 }
 
 func (s *Server) handleAdminExchangeStub(w http.ResponseWriter, r *http.Request) {

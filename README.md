@@ -77,9 +77,11 @@ copy ..\appsettings.example.json .\appsettings.json
 dotnet run -- appsettings.json
 ```
 
-流程：登录 → `groups/available`（0 报错 / 1 跳过 / >1 选组）→ `acquire` → 写临时 `.rdp` + `cmdkey` + `mstsc` → Enter 后 `release`。
+流程：登录 → `groups/available`（0 报错 / 1 跳过 / >1 选组）→ `acquire`（票据含 host/port/username/password）→ DPAPI `.rdp` + `cmdkey` + `mstsc` → Enter/退出后清理本地凭据并 `release`。
 
-若测试机关机或 3389 不通：设 `SkipMstsc: true` 只验证 API 分配链。
+控制面已配置 RDP 密码时，客户端应尽量直连、不弹本机凭据框；未配置密码才允许手输。
+
+若测试机关机或 3389 不通：设 `SkipMstsc: true` 只验证 API 分配链。运行客户端时若本机设了 HTTP 代理，请对 `127.0.0.1,localhost` 设 `NO_PROXY`。
 
 ## 四、冒烟检查清单
 

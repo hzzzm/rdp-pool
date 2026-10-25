@@ -202,13 +202,21 @@ func (s *PoolService) issueTicket(ctx context.Context, sessionID, resourceID, ho
 		sec, derr := vault.DecryptRDPSecret([]byte(s.Cfg.CredentialAESKey), blob)
 		if derr == nil && sec != nil {
 			tkt.Username = sec.Username
-			tkt.Password = sec.Password
+			tkt.Password = sec.Password // short-lived wire only; never log plaintext
 		}
+	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
 	}
 	_, _ = s.Store.DB.ExecContext(ctx, `
 		INSERT INTO rdp_tickets (id, session_id, expires_at, created_at)
 		VALUES (?, ?, DATE_ADD(NOW(3), INTERVAL ? SECOND), NOW(3))`,
 		tkt.TicketID, sessionID, int(s.Cfg.TicketTTL.Seconds()))
+	// Audit without password
+	meta, _ := json.Marshal(map[string]any{
+		"ticket_id": tkt.TicketID, "host": host, "port": port,
+		"username": tkt.Username, "has_password": tkt.Password != "",
+	})
+	_ = s.Store.InsertAudit(ctx, "system", "ticket", "ticket_issued", "session", sessionID, "", meta)
 	return tkt, nil
 }
 
@@ -220,6 +228,24 @@ func (s *PoolService) issueTicketStub(ctx context.Context, sess *domain.Session)
 		return nil, err
 	}
 	return s.issueTicket(ctx, sess.ID, sess.ResourceID, host, port)
+}
+
+// IssueSessionTicket re-issues a short-lived RDP connection ticket for an active/pending session.
+func (s *PoolService) IssueSessionTicket(ctx context.Context, userID, sessionID string) (*domain.RDPTicket, error) {
+	sess, err := s.Store.GetSession(ctx, sessionID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if sess.UserID != userID {
+		return nil, ErrForbidden
+	}
+	if sess.State != domain.SessionPending && sess.State != domain.SessionActive {
+		return nil, ErrGone
+	}
+	return s.issueTicketStub(ctx, sess)
 }
 
 func (s *PoolService) Heartbeat(ctx context.Context, userID, sessionID string, rdpConnected bool) (*domain.Session, error) {

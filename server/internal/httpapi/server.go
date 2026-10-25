@@ -43,7 +43,7 @@ func (s *Server) routes() {
 	s.Mux.HandleFunc("GET /api/v1/queue/me", s.withPoolUser(s.handleQueueMe))
 	s.Mux.HandleFunc("DELETE /api/v1/queue/me", s.withPoolUser(s.handleCancelQueue))
 	s.Mux.HandleFunc("GET /api/v1/ws/queue", s.handleWSQueueStub)
-	s.Mux.HandleFunc("POST /api/v1/sessions/{id}/ticket", s.withPoolUser(s.handleTicketStub))
+	s.Mux.HandleFunc("POST /api/v1/sessions/{id}/ticket", s.withPoolUser(s.handleTicket))
 
 	// Admin API (Nginx /pool-api → here; expects admin_token)
 	s.Mux.HandleFunc("POST /api/v1/admin/auth/exchange", s.handleAdminExchangeStub)
