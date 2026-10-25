@@ -1,6 +1,20 @@
 # Windows 客户端
 
-依赖：**.NET 6 SDK**（或更新）。仅 Windows 会调 `mstsc`；其它 OS 只打印票据。
+带自动凭据注入（cmdkey / `.rdp` / MsTscAx）。仅 Windows 会调 `mstsc`。
+
+## 解压即用（推荐给终端用户）
+
+```powershell
+# 在开发机打包（需本机有 .NET 6 Windows Desktop）
+..\scripts\pack-client-win.ps1
+# 产出：D:\Code\rpd-pool\dist\RdpPoolClient-win-x64.zip
+```
+
+解压后编辑 `appsettings.json`，双击 **`启动.cmd`**。包内已带运行时，**不必安装 .NET**。
+
+## 开发机直接跑
+
+依赖：**.NET 6 SDK**（Windows Desktop）。
 
 ```powershell
 cd RdpPoolClient

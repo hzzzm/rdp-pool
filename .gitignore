@@ -37,6 +37,7 @@ Thumbs.db
 # Build / client
 client/**/bin/
 client/**/obj/
+client/**/publish/
 client/**/*.user
 client/**/*.suo
 
