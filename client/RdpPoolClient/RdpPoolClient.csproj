@@ -8,6 +8,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <DisableWinExeOutputInference>true</DisableWinExeOutputInference>
     <AssemblyName>RdpPoolClient</AssemblyName>
+    <ApplicationIcon>..\assets\app.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\RdpPool.Config\RdpPool.Config.csproj" />

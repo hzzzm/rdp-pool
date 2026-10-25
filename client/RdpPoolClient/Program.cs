@@ -52,6 +52,8 @@ var login = await loginResp.Content.ReadFromJsonAsync<LoginResponse>(jsonOpts);
 http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", login!.AccessToken);
 Console.WriteLine("登录成功");
 
+using var tray = RdpPoolClient.TrayPresence.Start("RDP 资源池客户端");
+
 var groupsResp = await http.GetFromJsonAsync<GroupsResponse>("api/v1/groups/available", jsonOpts);
 var groups = groupsResp?.Groups ?? new List<GroupItem>();
 if (groups.Count == 0)

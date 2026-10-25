@@ -13,14 +13,15 @@
 解压后：
 
 1. 双击 **`RdpPoolSetup.exe`** → 填写服务器地址、用户名、密码 → 保存  
-2. 双击 **`RdpPoolClient.exe`** 登录并分配资源  
+2. **保存前会调用控制面登录校验**；失败则不写配置并提示中文错误  
+3. 双击 **`RdpPoolClient.exe`** 登录并分配资源（托盘会显示应用图标）  
 
-包内已带运行时，**不必安装 .NET**。无 `启动.cmd`。
+包内已带运行时，**不必安装 .NET**。无 `启动.cmd`。应用图标见 `assets/app.ico`（16/32/48/256）。
 
 ### 凭据如何存放
 
 - `appsettings.json` **不**保存明文 `Login` / `Password`
-- Setup 写入 `LoginProtected` / `PasswordProtected`：`ProtectedData`（DPAPI **CurrentUser**）→ Base64
+- Setup **仅在登录成功后**写入 `LoginProtected` / `PasswordProtected`：`ProtectedData`（DPAPI **CurrentUser**）→ Base64，以及 `ApiBaseUrl`
 - 密文仅同一 Windows 用户在本机可解；换用户/换机请重新 Setup
 - **旧版迁移**：若仍有明文 `Login`/`Password`，主程序首次加载会加密回写并清除明文字段
 

@@ -10,7 +10,10 @@ sealed class SetupForm : Form
     readonly CheckBox _skipMstsc = new() { Text = "仅验证 API（不启动远程桌面）", AutoSize = true };
     readonly CheckBox _autoRelease = new() { Text = "退出时自动释放会话", AutoSize = true, Checked = true };
     readonly Label _status = new() { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(420, 0) };
+    readonly Button _btnSave = new() { Text = "保存", Width = 90, Height = 28 };
+    readonly Button _btnCancel = new() { Text = "取消", Width = 90, Height = 28 };
     readonly string _configPath;
+    bool _busy;
 
     public SetupForm()
     {
@@ -21,8 +24,16 @@ sealed class SetupForm : Form
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(460, 300);
+        ClientSize = new Size(460, 320);
         Font = new Font("Microsoft YaHei UI", 9F);
+        try
+        {
+            Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Application;
+        }
+        catch
+        {
+            Icon = SystemIcons.Application;
+        }
 
         var layout = new TableLayoutPanel
         {
@@ -62,14 +73,12 @@ sealed class SetupForm : Form
             Dock = DockStyle.Fill,
             WrapContents = false
         };
-        var btnSave = new Button { Text = "保存", Width = 90, Height = 28 };
-        var btnCancel = new Button { Text = "取消", Width = 90, Height = 28 };
-        btnSave.Click += (_, _) => Save();
-        btnCancel.Click += (_, _) => Close();
-        AcceptButton = btnSave;
-        CancelButton = btnCancel;
-        buttons.Controls.Add(btnSave);
-        buttons.Controls.Add(btnCancel);
+        _btnSave.Click += async (_, _) => await SaveAsync();
+        _btnCancel.Click += (_, _) => Close();
+        AcceptButton = _btnSave;
+        CancelButton = _btnCancel;
+        buttons.Controls.Add(_btnSave);
+        buttons.Controls.Add(_btnCancel);
         layout.SetColumnSpan(buttons, 2);
         layout.Controls.Add(buttons, 0, 5);
 
@@ -78,7 +87,7 @@ sealed class SetupForm : Form
 
         var hint = new Label
         {
-            Text = "账密使用本机当前用户 DPAPI 加密后写入 appsettings.json；请先保存再运行 RdpPoolClient.exe。",
+            Text = "保存前会先向控制面校验账密；通过后才用本机 DPAPI 加密写入 appsettings.json。",
             AutoSize = true,
             MaximumSize = new Size(420, 0),
             ForeColor = Color.Gray
@@ -121,11 +130,26 @@ sealed class SetupForm : Form
         _autoRelease.Checked = existing.AutoRelease;
         _status.Text = string.IsNullOrEmpty(existing.Password) && string.IsNullOrEmpty(existing.Login)
             ? "已加载服务器地址；请填写用户名和密码后保存。"
-            : "已加载现有配置（密码已解密到输入框，保存后仍以密文落盘）。";
+            : "已加载现有配置（保存前仍会重新校验登录）。";
     }
 
-    void Save()
+    void SetBusy(bool busy)
     {
+        _busy = busy;
+        _btnSave.Enabled = !busy;
+        _btnCancel.Enabled = !busy;
+        _apiUrl.Enabled = !busy;
+        _login.Enabled = !busy;
+        _password.Enabled = !busy;
+        _skipMstsc.Enabled = !busy;
+        _autoRelease.Enabled = !busy;
+        UseWaitCursor = busy;
+    }
+
+    async Task SaveAsync()
+    {
+        if (_busy) return;
+
         var api = _apiUrl.Text.Trim();
         var login = _login.Text.Trim();
         var password = _password.Text;
@@ -159,6 +183,39 @@ sealed class SetupForm : Form
             return;
         }
 
+        // 记录保存前文件快照，失败时确保未写入
+        string? before = File.Exists(_configPath) ? File.ReadAllText(_configPath) : null;
+        var beforeWriteTime = File.Exists(_configPath) ? File.GetLastWriteTimeUtc(_configPath) : (DateTime?)null;
+
+        SetBusy(true);
+        _status.ForeColor = Color.DimGray;
+        _status.Text = "正在校验登录…";
+
+        AuthVerifyResult verify;
+        try
+        {
+            verify = await ControlPlaneAuth.VerifyLoginAsync(api, login, password);
+        }
+        finally
+        {
+            SetBusy(false);
+        }
+
+        if (!verify.Ok)
+        {
+            _status.ForeColor = Color.Firebrick;
+            _status.Text = "登录校验失败，未保存配置。";
+            MessageBox.Show(this,
+                "无法保存：控制面登录校验未通过。\n\n" + verify.Message,
+                "登录失败",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+
+            // 防御：若意外写过文件则回滚
+            EnsureConfigUnchanged(before, beforeWriteTime);
+            return;
+        }
+
         ClientSettings baseSettings;
         try
         {
@@ -183,19 +240,41 @@ sealed class SetupForm : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, "保存失败：\n" + ex.Message, "错误",
+            MessageBox.Show(this, "登录已通过，但写入配置失败：\n" + ex.Message, "错误",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
 
         _status.ForeColor = Color.ForestGreen;
-        _status.Text = "已保存（账密已 DPAPI 加密）：" + _configPath;
+        _status.Text = "登录校验通过，已加密保存：" + _configPath;
         MessageBox.Show(this,
-            "配置已保存。\n\n请运行 RdpPoolClient.exe 登录资源池。",
+            "登录校验成功，配置已保存。\n\n请运行 RdpPoolClient.exe 使用资源池。",
             "保存成功",
             MessageBoxButtons.OK,
             MessageBoxIcon.Information);
         DialogResult = DialogResult.OK;
         Close();
+    }
+
+    void EnsureConfigUnchanged(string? before, DateTime? beforeWriteTime)
+    {
+        try
+        {
+            if (before is null)
+            {
+                if (File.Exists(_configPath))
+                    File.Delete(_configPath);
+                return;
+            }
+
+            if (!File.Exists(_configPath)) return;
+            var afterTime = File.GetLastWriteTimeUtc(_configPath);
+            if (beforeWriteTime.HasValue && afterTime > beforeWriteTime.Value.AddMilliseconds(5))
+                File.WriteAllText(_configPath, before);
+        }
+        catch
+        {
+            // ignore rollback errors
+        }
     }
 }

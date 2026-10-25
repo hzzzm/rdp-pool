@@ -72,10 +72,14 @@ if (-not (Test-Path $wf)) {
 
 $clientExe = Join-Path $Stage "RdpPoolClient.exe"
 $setupExe = Join-Path $Stage "RdpPoolSetup.exe"
-& $csc /nologo /optimize+ /target:exe "/out:$clientExe" (Join-Path $LauncherSrc "LaunchClient.cs")
+$appIco = Join-Path $Repo "client\assets\app.ico"
+$icoArg = @()
+if (Test-Path $appIco) { $icoArg = @("/win32icon:$appIco") }
+
+& $csc /nologo /optimize+ /target:exe "/out:$clientExe" @icoArg (Join-Path $LauncherSrc "LaunchClient.cs")
 if ($LASTEXITCODE -ne 0) { throw "compile RdpPoolClient.exe launcher failed" }
 
-& $csc /nologo /optimize+ /target:winexe "/r:$wf" "/out:$setupExe" (Join-Path $LauncherSrc "LaunchSetup.cs")
+& $csc /nologo /optimize+ /target:winexe "/r:$wf" "/out:$setupExe" @icoArg (Join-Path $LauncherSrc "LaunchSetup.cs")
 if ($LASTEXITCODE -ne 0) { throw "compile RdpPoolSetup.exe launcher failed" }
 
 # 模板配置：无明文账密；用户用 Setup 写入 DPAPI 字段
@@ -99,10 +103,11 @@ Copy-Item (Join-Path $RuntimeRoot "dotnet.exe") (Join-Path $rt "dotnet.exe") -Fo
 ## 启动
 
 1. 解压全部文件到任意文件夹（保留 dotnet 子目录）
-2. 双击 RdpPoolSetup.exe：填写服务器地址、用户名、密码并保存
-3. 双击 RdpPoolClient.exe 登录并分配资源
+2. 双击 RdpPoolSetup.exe：填写服务器地址、用户名、密码
+3. 点保存：会先向控制面校验登录；失败则不写配置；成功后 DPAPI 加密写入
+4. 双击 RdpPoolClient.exe 登录并分配资源
 
-不要手写明文密码到 appsettings.json；Setup 会用本机当前用户 DPAPI 加密后写入。
+不要手写明文密码到 appsettings.json。
 
 ## 配置（appsettings.json）
 
