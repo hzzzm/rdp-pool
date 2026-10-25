@@ -6,18 +6,38 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using RdpPool.Config;
 
-var cfgPath = args.Length > 0 ? args[0] : "appsettings.json";
+var cfgPath = args.Length > 0 ? args[0] : ClientConfigStore.DefaultPath;
 if (!File.Exists(cfgPath))
 {
-    Console.Error.WriteLine($"缺少 {cfgPath}。请复制 appsettings.example.json 为 appsettings.json 并填写本地配置。");
-    Console.Error.WriteLine("依赖：.NET 6 SDK（https://dotnet.microsoft.com/download）");
+    Console.Error.WriteLine($"缺少 {cfgPath}。请先运行 RdpPoolSetup.exe 配置服务器地址与账号。");
+    Console.Error.WriteLine("开发机也可：复制 appsettings.example.json 后用 Setup 保存（勿再手写明文密码）。");
+    return 1;
+}
+
+ClientSettings cfg;
+try
+{
+    cfg = ClientConfigStore.Load(cfgPath, migratePlaintextToDisk: true);
+}
+catch (Exception ex)
+{
+    Console.Error.WriteLine("读取配置失败: " + ex.Message);
+    Console.Error.WriteLine("请运行 RdpPoolSetup.exe 重新保存（DPAPI 密文仅本机当前用户可解）。");
+    return 1;
+}
+
+if (cfg.MigratedFromPlaintext)
+    Console.WriteLine("已将旧版明文 Login/Password 迁移为 DPAPI 加密字段。");
+
+if (string.IsNullOrWhiteSpace(cfg.Login) || string.IsNullOrEmpty(cfg.Password))
+{
+    Console.Error.WriteLine("配置中无有效用户名/密码。请运行 RdpPoolSetup.exe。");
     return 1;
 }
 
 var jsonOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-var cfg = JsonSerializer.Deserialize<AppConfig>(await File.ReadAllTextAsync(cfgPath), jsonOpts)
-          ?? throw new InvalidOperationException("bad config");
 using var http = new HttpClient { BaseAddress = new Uri(cfg.ApiBaseUrl.TrimEnd('/') + "/") };
 
 Console.WriteLine($"API: {cfg.ApiBaseUrl}");
@@ -451,20 +471,6 @@ static class RdpLaunch
 
     [DllImport("user32.dll")]
     static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
-}
-
-sealed class AppConfig
-{
-    public string ApiBaseUrl { get; set; } = "http://127.0.0.1:8081";
-    public string Login { get; set; } = "demo";
-    public string Password { get; set; } = "";
-    public string PreferredGroupId { get; set; } = "";
-    public int HeartbeatIntervalSec { get; set; } = 15;
-    public string ClientInstanceId { get; set; } = "";
-    public bool SkipMstsc { get; set; }
-    public bool AutoRelease { get; set; } = true;
-    /// <summary>ActiveX/mstsc 连通后保持秒数再退出（冒烟用）；0=交互等待。</summary>
-    public int ConnectHoldSec { get; set; }
 }
 
 sealed class LoginResponse

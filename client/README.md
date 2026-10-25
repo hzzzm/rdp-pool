@@ -10,20 +10,33 @@
 # 产出：D:\Code\rpd-pool\dist\RdpPoolClient-win-x64.zip
 ```
 
-解压后编辑 `appsettings.json`，双击 **`启动.cmd`**。包内已带运行时，**不必安装 .NET**。
+解压后：
+
+1. 双击 **`RdpPoolSetup.exe`** → 填写服务器地址、用户名、密码 → 保存  
+2. 双击 **`RdpPoolClient.exe`** 登录并分配资源  
+
+包内已带运行时，**不必安装 .NET**。无 `启动.cmd`。
+
+### 凭据如何存放
+
+- `appsettings.json` **不**保存明文 `Login` / `Password`
+- Setup 写入 `LoginProtected` / `PasswordProtected`：`ProtectedData`（DPAPI **CurrentUser**）→ Base64
+- 密文仅同一 Windows 用户在本机可解；换用户/换机请重新 Setup
+- **旧版迁移**：若仍有明文 `Login`/`Password`，主程序首次加载会加密回写并清除明文字段
 
 ## 开发机直接跑
 
 依赖：**.NET 6 SDK**（Windows Desktop）。
 
 ```powershell
+cd RdpPoolSetup
+dotnet run
+# 或
 cd RdpPoolClient
-copy ..\appsettings.example.json .\appsettings.json
-# 填写 ApiBaseUrl（默认 http://127.0.0.1:8081）、Login/Password
-# 测试机关机时: "SkipMstsc": true
-
-dotnet run -- appsettings.json
+dotnet run -- path\to\appsettings.json
 ```
+
+也可用 Setup 生成加密配置后再 `dotnet run`。测试机关机时在 Setup 勾选「仅验证 API」，或设 `"SkipMstsc": true`。
 
 流程对齐架构 §6.6：登录 → 可用组 0/1/>1 → acquire → 注入控制面返回的资源账密 → 建连 →（退出）清理本地凭据并 `release`。
 
