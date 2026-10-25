@@ -94,14 +94,20 @@ else
     Console.WriteLine("可用组:");
     for (var i = 0; i < groups.Count; i++)
         Console.WriteLine($"  [{i}] {groups[i].Name} idle={groups[i].IdleCount} busy={groups[i].BusyCount}");
-    if (!string.IsNullOrEmpty(cfg.PreferredGroupId) && groups.Any(g => g.Id == cfg.PreferredGroupId))
-        groupId = cfg.PreferredGroupId;
-    else
+
+    var choices = groups.Select(g => new RdpPoolClient.GroupChoice
     {
-        // WinExe 无控制台交互：默认选第一组；可在 Setup/配置里设 PreferredGroupId
-        groupId = groups[0].Id;
-        Console.WriteLine($"多组且未指定 PreferredGroupId，默认选用: {groups[0].Name}");
-    }
+        Id = g.Id,
+        Name = g.Name,
+        IdleCount = g.IdleCount,
+        BusyCount = g.BusyCount
+    }).ToList();
+    var picked = RdpPoolClient.GroupPicker.Pick(choices, cfg.PreferredGroupId);
+    if (string.IsNullOrEmpty(picked))
+        return Die("已取消选组，未发起分配。");
+    groupId = picked;
+    var name = groups.FirstOrDefault(g => g.Id == groupId)?.Name ?? groupId;
+    Console.WriteLine($"已选组: {name}");
 }
 
 var acquireResp = await http.PostAsJsonAsync("api/v1/sessions/acquire", new
