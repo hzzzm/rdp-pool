@@ -136,6 +136,38 @@ internal static class RdpAxSession
         System.Windows.Forms.Timer? pollTimer = null;
         System.Windows.Forms.Timer? holdTimer = null;
         object? ocxRef = null;
+        IDisposable? eventAdvise = null;
+
+        bool IsOcxConnected()
+        {
+            try
+            {
+                if (ocxRef == null) return false;
+                return Convert.ToInt32(GetComProp(ocxRef, "Connected")) == 1;
+            }
+            catch { return false; }
+        }
+
+        void ReassertSessionUi()
+        {
+            try
+            {
+                if (ocxRef == null || !IsOcxConnected()) return;
+                if (wantOcxFullscreen)
+                {
+                    try { SetComProp(ocxRef, "FullScreen", true); } catch { /* ignore */ }
+                    ocxFsActive = true;
+                    hostHidden = false; // 允许再次执行隐藏宿主
+                    HideHostAfterOcxFullscreen();
+                    BringRdpToFront(ocxRef);
+                }
+                else
+                {
+                    ForegroundUtil.Activate(form);
+                }
+            }
+            catch { /* ignore */ }
+        }
 
         bool ConfirmDisconnectUi()
         {
@@ -157,13 +189,24 @@ internal static class RdpAxSession
             }
         }
 
+        /// <summary>用户主动退出：先确认（仍保持连接），是才关窗；否则恢复全屏/前台。</summary>
         void CloseHost(bool askConfirm = true)
         {
             if (closing || form.IsDisposed) return;
-            if (askConfirm && !ConfirmDisconnectUi())
-                return;
-            userConfirmedClose = true;
-            closing = true;
+            if (askConfirm)
+            {
+                if (!ConfirmDisconnectUi())
+                {
+                    ReassertSessionUi();
+                    return;
+                }
+                userConfirmedClose = true;
+            }
+            else
+            {
+                userConfirmedClose = true;
+            }
+
             try
             {
                 if (form.InvokeRequired)
@@ -381,10 +424,17 @@ internal static class RdpAxSession
                         }
                         else if (connected && c == 0)
                         {
+                            // 已断开（连接栏已拆会话 / 对端踢）：勿再弹「是否断开」——否也救不回
                             localDetail += "; disconnected=0";
                             pollTimer.Stop();
-                            // 连接栏「断开」或对端断开：仍确认（冒烟路径已 skip）
-                            CloseHost(askConfirm: true);
+                            connected = false;
+                            if (userConfirmedClose || closing)
+                                CloseHost(askConfirm: false);
+                            else
+                            {
+                                // 非本端确认的断开：直接收掉宿主，避免空白残留
+                                CloseHost(askConfirm: false);
+                            }
                             return;
                         }
 
@@ -410,6 +460,39 @@ internal static class RdpAxSession
                 };
                 pollTimer.Start();
 
+                // 连接栏关闭/断开：在仍连接时 OnConfirmClose 先问；否可取消
+                eventAdvise = MsTscEvents.AdviseConfirmClose(ocx, () =>
+                {
+                    if (skipCloseConfirm || userConfirmedClose) return true;
+                    var ok = false;
+                    try
+                    {
+                        if (form.InvokeRequired)
+                        {
+                            form.Invoke(new Action(() => { ok = ConfirmDisconnectUi(); }));
+                        }
+                        else
+                            ok = ConfirmDisconnectUi();
+                    }
+                    catch { ok = true; }
+
+                    if (ok)
+                    {
+                        userConfirmedClose = true;
+                        localDetail += "; confirmClose=yes";
+                        return true;
+                    }
+                    localDetail += "; confirmClose=no";
+                    // 下一消息泵周期恢复全屏/前台
+                    try
+                    {
+                        form.BeginInvoke(new Action(ReassertSessionUi));
+                    }
+                    catch { ReassertSessionUi(); }
+                    return false;
+                });
+                if (eventAdvise != null) localDetail += "; onConfirmClose=advised";
+
                 InvokeCom(ocx, "Connect");
                 localDetail += "; connect_called";
                 ForegroundUtil.Activate(form);
@@ -424,11 +507,13 @@ internal static class RdpAxSession
 
         form.FormClosing += (_, e) =>
         {
-            if (!userConfirmedClose && !skipCloseConfirm && !closing)
+            // 必须在 Disconnect 之前确认；否=取消并保持会话
+            if (!userConfirmedClose && !skipCloseConfirm)
             {
-                if (!ConfirmDisconnectUi())
+                if (IsOcxConnected() && !ConfirmDisconnectUi())
                 {
                     e.Cancel = true;
+                    ReassertSessionUi();
                     return;
                 }
                 userConfirmedClose = true;
@@ -437,11 +522,14 @@ internal static class RdpAxSession
             closing = true;
             pollTimer?.Stop();
             holdTimer?.Stop();
+            try { eventAdvise?.Dispose(); } catch { /* ignore */ }
+            eventAdvise = null;
             try
             {
                 var ocx = ocxRef ?? ((OcxHost)ax!).GetOcxObject();
                 if (ocx != null)
                 {
+                    // 仅在用户确认之后才 Disconnect
                     try { SetComProp(ocx, "FullScreen", false); } catch { /* ignore */ }
                     try { InvokeCom(ocx, "Disconnect"); } catch { /* ignore */ }
                 }
