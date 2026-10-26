@@ -140,6 +140,18 @@ internal static class RdpAxSession
         System.Windows.Forms.Timer? holdTimer = null;
         object? ocxRef = null;
         IDisposable? eventAdvise = null;
+        ConnectionBarCloseGuard? bbarGuard = null;
+        var axLogPath = Path.Combine(Path.GetTempPath(), "rdp-pool-client-ax.log");
+        void AxLog(string s)
+        {
+            try
+            {
+                File.AppendAllText(axLogPath,
+                    DateTime.Now.ToString("HH:mm:ss.fff ") + s + Environment.NewLine);
+            }
+            catch { /* ignore */ }
+            localDetail += "; " + s;
+        }
 
         bool IsOcxConnected()
         {
@@ -354,6 +366,40 @@ internal static class RdpAxSession
 
         var redirectingMaximize = false;
 
+        void EnsureBbarCloseGuard()
+        {
+            if (skipCloseConfirm) return;
+            try
+            {
+                bbarGuard ??= new ConnectionBarCloseGuard(
+                    Environment.ProcessId,
+                    form,
+                    () =>
+                    {
+                        // 原生 X 已吞掉；此处弹中文确认。否=保持全屏连接；是=再断开。
+                        if (closing || userConfirmedClose || form.IsDisposed) return;
+                        var wasFs = ocxFsActive;
+                        AxLog("bbar-x-confirm begin wasFs=" + wasFs);
+                        if (!ConfirmDisconnectUi())
+                        {
+                            OnCloseCancelled(wasFs);
+                            AxLog("bbar-x-confirm no");
+                            return;
+                        }
+                        userConfirmedClose = true;
+                        AxLog("bbar-x-confirm yes");
+                        CloseHost(askConfirm: false);
+                    },
+                    AxLog);
+                if (!bbarGuard.IsSubclassed)
+                    bbarGuard.TryAttach();
+            }
+            catch (Exception ex)
+            {
+                AxLog("bbar-guard-err=" + ex.Message);
+            }
+        }
+
         void EnterOcxFullscreen(object ocx)
         {
             TrySetKeyboardHookMode(ocx, 1);
@@ -378,6 +424,25 @@ internal static class RdpAxSession
             }
             HideHostAfterOcxFullscreen();
             BringRdpToFront(ocx);
+            // 连接栏 HWND 可能略晚创建：立刻试一次，poll 里还会重试
+            EnsureBbarCloseGuard();
+            try
+            {
+                var t = new System.Windows.Forms.Timer { Interval = 300 };
+                var n = 0;
+                t.Tick += (_, _) =>
+                {
+                    n++;
+                    EnsureBbarCloseGuard();
+                    if (bbarGuard?.IsSubclassed == true || n >= 15)
+                    {
+                        t.Stop();
+                        t.Dispose();
+                    }
+                };
+                t.Start();
+            }
+            catch { /* ignore */ }
         }
 
         // DisplayResolution=fullscreen 会话：标题栏最大化 / 双击标题栏 → 真 OCX FullScreen，不是 Form 最大化
@@ -494,6 +559,8 @@ internal static class RdpAxSession
                             if (ocxFsActive && !fs)
                             {
                                 // 用户点了连接栏「窗口化」
+                                try { bbarGuard?.Dispose(); } catch { /* ignore */ }
+                                bbarGuard = null;
                                 RestoreHostToWindowed(ocx);
                             }
                             else if (!ocxFsActive && fs)
@@ -509,33 +576,33 @@ internal static class RdpAxSession
                                     EnterOcxFullscreen(ocx);
                                 }
                             }
+                            else if (ocxFsActive && fs && bbarGuard?.IsSubclassed != true)
+                            {
+                                EnsureBbarCloseGuard();
+                            }
                         }
                     }
                     catch { /* ignore poll errors */ }
                 };
                 pollTimer.Start();
 
-                // 连接栏 X/关闭：OnConfirmClose 在 Disconnect 前询问（全屏时尤其关键）
-                eventAdvise = MsTscEvents.AdviseConfirmClose(ocx, () =>
+                // RequestClose 路径的 OnConfirmClose（连接栏 X 不走这里，见 ConnectionBarCloseGuard）
+                var advise = MsTscEvents.AdviseConfirmClose(ocx, () =>
                 {
                     if (skipCloseConfirm || userConfirmedClose) return true;
-                    // 以当前是否 OCX 全屏为准（勿用 hostHidden 误判窗口化）
                     var wasFs = ocxFsActive;
+                    AxLog("OnConfirmClose fired wasFs=" + wasFs);
                     bool ok;
-                    try
-                    {
-                        // MsTsc 事件多在 UI STA；同步 Invoke 易与 COM 重入死锁 → 直接弹
-                        ok = ConfirmDisconnectUi();
-                    }
-                    catch { ok = false; } // 失败则拒绝关闭，避免无确认断开
+                    try { ok = ConfirmDisconnectUi(); }
+                    catch { ok = false; }
 
                     if (ok)
                     {
                         userConfirmedClose = true;
-                        localDetail += "; confirmClose=yes";
-                        return true; // 允许 OCX 关闭 → 随后 Disconnect
+                        AxLog("confirmClose=yes");
+                        return true;
                     }
-                    localDetail += "; confirmClose=no";
+                    AxLog("confirmClose=no");
                     try
                     {
                         if (!form.IsDisposed)
@@ -544,10 +611,10 @@ internal static class RdpAxSession
                             OnCloseCancelled(wasFs);
                     }
                     catch { OnCloseCancelled(wasFs); }
-                    return false; // 拒绝关闭，会话继续
+                    return false;
                 });
-                if (eventAdvise != null) localDetail += "; onConfirmClose=advised";
-                else localDetail += "; onConfirmClose=adviseFailed";
+                eventAdvise = advise.Cookie;
+                AxLog("onConfirmClose=" + advise.Detail + " iid=" + MsTscEvents.EventsIid);
 
                 InvokeCom(ocx, "Connect");
                 localDetail += "; connect_called";
@@ -579,6 +646,8 @@ internal static class RdpAxSession
             closing = true;
             pollTimer?.Stop();
             holdTimer?.Stop();
+            try { bbarGuard?.Dispose(); } catch { /* ignore */ }
+            bbarGuard = null;
             try { eventAdvise?.Dispose(); } catch { /* ignore */ }
             eventAdvise = null;
             try

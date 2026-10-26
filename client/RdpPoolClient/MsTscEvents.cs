@@ -5,44 +5,84 @@ using System.Windows.Forms;
 namespace RdpPoolClient;
 
 /// <summary>
-/// 订阅 IMsTscAxEvents.OnConfirmClose：连接栏 X/关闭在 Disconnect 之前询问容器。
+/// 订阅 IMsTscAxEvents。注意：OnConfirmClose 仅在容器调用 IMsRdpClient::RequestClose 时触发，
+/// 连接栏 X 不会触发该事件（见 MSDN）。连接栏 X 由 ConnectionBarCloseGuard 拦截。
 /// </summary>
 static class MsTscEvents
 {
-    public static readonly Guid EventsIid = new("336D5562-EFA8-482E-8CB3-C6C43507329C");
+    /// <summary>mstscax.dll 类型库中的真实 IID（勿用网上误抄的 C6C43507…）。</summary>
+    public static readonly Guid EventsIid = new("336D5562-EFA8-482E-8CB3-C5C0FC7A7DB6");
     public const int DispidOnConfirmClose = 15;
 
-    /// <param name="allowClose">返回 true=允许关闭并断开；false=取消，会话继续。</param>
-    public static IDisposable? AdviseConfirmClose(object ocx, Func<bool> allowClose)
+    public readonly struct AdviseResult
     {
-        // 1) AxHost.ConnectionPointCookie + 完整事件接口
+        public readonly IDisposable? Cookie;
+        public readonly string Detail;
+        public AdviseResult(IDisposable? cookie, string detail)
+        {
+            Cookie = cookie;
+            Detail = detail;
+        }
+    }
+
+    /// <param name="allowClose">返回 true=允许关闭并断开；false=取消，会话继续。</param>
+    public static AdviseResult AdviseConfirmClose(object ocx, Func<bool> allowClose)
+    {
+        // 1) AxHost.ConnectionPointCookie + 正确事件 IID 的接口
         try
         {
             var sink = new ConfirmCloseSink(allowClose);
             var cookie = new AxHost.ConnectionPointCookie(ocx, sink, typeof(IMsTscAxEvents));
-            return new CookieDisposable(cookie);
+            return new AdviseResult(new CookieDisposable(cookie), "cookie+iface");
         }
-        catch { /* fall through */ }
+        catch (Exception ex)
+        {
+            // fall through
+            var cookieEx = ex.GetType().Name;
+            try
+            {
+                var sink = new ConfirmCloseSink(allowClose);
+                if (TryAdvise(ocx, sink, out var manual) && manual != null)
+                    return new AdviseResult(manual, "cpc+iface afterCookieFail=" + cookieEx);
+            }
+            catch (Exception ex2)
+            {
+                try
+                {
+                    var sink = new DispatchConfirmSink(allowClose);
+                    if (TryAdvise(ocx, sink, out var manual) && manual != null)
+                        return new AdviseResult(manual, "cpc+idispatch after=" + cookieEx + "/" + ex2.GetType().Name);
+                }
+                catch (Exception ex3)
+                {
+                    return new AdviseResult(null, "adviseFailed cookie=" + cookieEx
+                        + " iface=" + ex2.GetType().Name
+                        + " idisp=" + ex3.GetType().Name + ":" + ex3.Message);
+                }
+            }
+        }
 
-        // 2) 手动 CPC + 事件接口 sink
+        // 2) 手动 CPC（若 cookie 未抛但返回了空——不应发生）
         try
         {
             var sink = new ConfirmCloseSink(allowClose);
             if (TryAdvise(ocx, sink, out var manual) && manual != null)
-                return manual;
+                return new AdviseResult(manual, "cpc+iface");
         }
         catch { /* fall through */ }
 
-        // 3) IDispatch sink（部分 MsTsc 版本对自定义接口 Advise 不稳，但 IDispatch Invoke 可用）
         try
         {
             var sink = new DispatchConfirmSink(allowClose);
             if (TryAdvise(ocx, sink, out var manual) && manual != null)
-                return manual;
+                return new AdviseResult(manual, "cpc+idispatch");
         }
-        catch { /* ignore */ }
+        catch (Exception ex)
+        {
+            return new AdviseResult(null, "adviseFailed " + ex.GetType().Name + ":" + ex.Message);
+        }
 
-        return null;
+        return new AdviseResult(null, "adviseFailed no-cp");
     }
 
     static bool TryAdvise(object ocx, object sink, out IDisposable? cookie)
@@ -124,7 +164,7 @@ static class MsTscEvents
         public void OnConfirmClose([MarshalAs(UnmanagedType.VariantBool)] ref bool pfAllowClose)
         {
             try { pfAllowClose = _allowClose(); }
-            catch { pfAllowClose = false; } // 失败则拒绝关闭，避免无确认断开
+            catch { pfAllowClose = false; }
         }
 
         public void OnReceivedTSPublicKey(string publicKey, ref bool pfContinueLogon) { pfContinueLogon = true; }
@@ -136,7 +176,7 @@ static class MsTscEvents
         public void OnRemoteWindowDisplayed(bool vbDisplayed, ref FreeRdpRect wnd, RemoteWindowDisplayedAttribute windowAttribute) { }
         public void OnLogonError(int lError) { }
         public void OnFocusReleased(int iDirection) { }
-        public void OnUserNameRequired(ref bool pfContinue) { pfContinue = true; }
+        public void OnUserNameAcquired(string bstrUserName) { }
         public void OnMouseInputModeChanged(bool fMouseModeRelative) { }
         public void OnServiceMessageReceived(string serviceMessage) { }
         public void OnConnectionBarPullDown() { }
@@ -146,7 +186,6 @@ static class MsTscEvents
         public void OnAutoReconnecting2(int disconnectReason, bool networkAvailable, int attemptCount, int maxAttemptCount, ref AutoReconnectContinueState state) { }
     }
 
-    /// <summary>IDispatch 回退：正确写回 OnConfirmClose 的 VARIANT_BOOL* out 参数。</summary>
     [ComVisible(true)]
     [ClassInterface(ClassInterfaceType.None)]
     sealed class DispatchConfirmSink : IDispatch
@@ -157,7 +196,7 @@ static class MsTscEvents
         public int GetTypeInfoCount(out int pctinfo) { pctinfo = 0; return 0; }
         public int GetTypeInfo(int iTInfo, int lcid, out IntPtr ppTInfo) { ppTInfo = IntPtr.Zero; return 0; }
         public int GetIDsOfNames(ref Guid riid, IntPtr rgszNames, int cNames, int lcid, IntPtr rgDispId) =>
-            unchecked((int)0x80020006); // DISP_E_UNKNOWNNAME
+            unchecked((int)0x80020006);
 
         public int Invoke(int dispIdMember, ref Guid riid, int lcid, short wFlags, ref DISPPARAMS pDispParams,
             IntPtr pVarResult, IntPtr pExcepInfo, IntPtr puArgErr)
@@ -176,17 +215,15 @@ static class MsTscEvents
         static void WriteAllowClose(ref DISPPARAMS p, bool allow)
         {
             if (p.cArgs < 1 || p.rgvarg == IntPtr.Zero) return;
-            var vtBool = allow ? (short)-1 : (short)0; // VARIANT_TRUE / VARIANT_FALSE
+            var vtBool = allow ? (short)-1 : (short)0;
             try
             {
-                // 参数倒序：rgvarg[0] = 最后一个参数 = pfAllowClose
                 var v = Marshal.PtrToStructure<Variant>(p.rgvarg);
-                if ((v.vt & 0x4000) != 0 && v.ptr != IntPtr.Zero) // VT_BYREF
+                if ((v.vt & 0x4000) != 0 && v.ptr != IntPtr.Zero)
                 {
-                    // VT_BYREF|VT_BOOL → 写 short；VT_BYREF|VT_VARIANT → 写完整 VARIANT
-                    if ((v.vt & 0x0FFF) == 12 /*VT_VARIANT*/)
+                    if ((v.vt & 0x0FFF) == 12)
                     {
-                        Marshal.WriteInt16(v.ptr, 0, 11); // VT_BOOL
+                        Marshal.WriteInt16(v.ptr, 0, 11);
                         Marshal.WriteInt16(v.ptr, 8, vtBool);
                     }
                     else
@@ -195,12 +232,8 @@ static class MsTscEvents
                     }
                     return;
                 }
-
-                // 偶发直接传 VT_BOOL 槽
                 if (v.vt == 11)
-                {
                     Marshal.WriteInt16(p.rgvarg, 8, vtBool);
-                }
             }
             catch
             {
@@ -240,9 +273,9 @@ static class MsTscEvents
         public int left, top, right, bottom;
     }
 
-    /// <summary>IMsTscAxEvents（IDispatch）。DispId 与 MsTscAx 文档一致。</summary>
+    /// <summary>DispId 与本机 mstscax.dll 类型库一致。</summary>
     [ComImport]
-    [Guid("336D5562-EFA8-482E-8CB3-C6C43507329C")]
+    [Guid("336D5562-EFA8-482E-8CB3-C5C0FC7A7DB6")]
     [InterfaceType(ComInterfaceType.InterfaceIsIDispatch)]
     public interface IMsTscAxEvents
     {
@@ -267,17 +300,17 @@ static class MsTscEvents
         [DispId(19)] void OnAuthenticationWarningDismissed();
         [DispId(20)] void OnRemoteProgramResult(string bstrRemoteProgram, RemoteProgramResult lError, bool vbIsExecutable);
         [DispId(21)] void OnRemoteProgramDisplayed(bool vbDisplayed, uint uDisplayInformation);
-        [DispId(22)] void OnRemoteWindowDisplayed(bool vbDisplayed, ref FreeRdpRect wnd, RemoteWindowDisplayedAttribute windowAttribute);
-        [DispId(23)] void OnLogonError(int lError);
-        [DispId(24)] void OnFocusReleased(int iDirection);
-        [DispId(25)] void OnUserNameRequired(ref bool pfContinue);
+        [DispId(29)] void OnRemoteWindowDisplayed(bool vbDisplayed, ref FreeRdpRect wnd, RemoteWindowDisplayedAttribute windowAttribute);
+        [DispId(22)] void OnLogonError(int lError);
+        [DispId(23)] void OnFocusReleased(int iDirection);
+        [DispId(24)] void OnUserNameAcquired(string bstrUserName);
         [DispId(26)] void OnMouseInputModeChanged(bool fMouseModeRelative);
-        [DispId(27)] void OnServiceMessageReceived(string serviceMessage);
-        [DispId(28)] void OnConnectionBarPullDown();
-        [DispId(29)] void OnNetworkStatusChanged(uint qualityLevel, int bandwidth, int rtt);
-        [DispId(30)] void OnDevicesButtonPressed();
-        [DispId(31)] void OnAutoReconnected();
-        [DispId(32)] void OnAutoReconnecting2(int disconnectReason, bool networkAvailable, int attemptCount, int maxAttemptCount, ref AutoReconnectContinueState state);
+        [DispId(28)] void OnServiceMessageReceived(string serviceMessage);
+        [DispId(30)] void OnConnectionBarPullDown();
+        [DispId(32)] void OnNetworkStatusChanged(uint qualityLevel, int bandwidth, int rtt);
+        [DispId(35)] void OnDevicesButtonPressed();
+        [DispId(33)] void OnAutoReconnected();
+        [DispId(34)] void OnAutoReconnecting2(int disconnectReason, bool networkAvailable, int attemptCount, int maxAttemptCount, ref AutoReconnectContinueState state);
     }
 
     [ComImport]
