@@ -7,9 +7,9 @@ namespace RdpPoolClient;
 /// <summary>
 /// MsTscAx ActiveX：ClearTextPassword 注入。
 /// <para>
-/// 全屏：Connect 成功后设 MsTscAx.FullScreen=true（与 mstsc 一样把 Win/Alt+Tab 交给远程），
-/// 随即把宿主 Form 移出任务栏并藏起（Opacity=0 / 移出屏幕），避免空白第二窗。
-/// 窗口化：FullScreen=false，固定 ClientSize。
+/// 全屏：Connect 后 FullScreen=true（Win/Alt+Tab 进远程）+ 藏起宿主任务栏项。
+/// 连接栏「窗口化」：FullScreen→false 时立刻还原为可见的 Sizable 宿主（有关闭按钮），
+/// 避免 Ax 画在 Opacity=0 的隐形全屏 Form 上卡住。
 /// </para>
 /// </summary>
 internal static class RdpAxSession
@@ -84,14 +84,15 @@ internal static class RdpAxSession
         Exception? connectError = null;
         var connected = false;
         var hostHidden = false;
+        var ocxFsActive = false;
         var closing = false;
 
-        // 宿主仅作 ActiveX 容器；全屏成功后会藏起，只留 OCX 全屏表面在前台
         var form = new Form
         {
             Text = host + " — RDP Pool",
             StartPosition = FormStartPosition.Manual,
             ShowInTaskbar = true,
+            KeyPreview = true,
             FormBorderStyle = FormBorderStyle.None,
             ControlBox = false,
             MaximizeBox = false,
@@ -111,13 +112,7 @@ internal static class RdpAxSession
         }
         else
         {
-            form.FormBorderStyle = FormBorderStyle.Sizable;
-            form.ControlBox = true;
-            form.MaximizeBox = true;
-            form.MinimizeBox = true;
-            form.StartPosition = FormStartPosition.CenterScreen;
-            form.ClientSize = new Size(deskW, deskH);
-            form.MinimumSize = new Size(640, 480);
+            ApplyWindowedChrome(form, deskW, deskH, screenBounds);
         }
 
         AxHost? ax = null;
@@ -157,7 +152,7 @@ internal static class RdpAxSession
             hostHidden = true;
             try
             {
-                // 不设 Visible=false：部分环境下会连带拆掉 OCX 全屏表面
+                // 不设 Visible=false，以免拆掉 OCX 全屏表面
                 form.ShowInTaskbar = false;
                 form.Opacity = 0;
                 form.Size = new Size(1, 1);
@@ -170,13 +165,58 @@ internal static class RdpAxSession
             }
         }
 
+        /// <summary>
+        /// 连接栏「窗口化」：OCX 退出 FullScreen 后，必须把宿主还原成可见的带边框窗口，
+        /// 否则 Ax 画在隐形/无边框全屏 Form 上 → 卡住无法退出。
+        /// </summary>
+        void RestoreHostToWindowed(object? ocx)
+        {
+            if (form.IsDisposed) return;
+            try
+            {
+                if (ocx != null)
+                {
+                    try { SetComProp(ocx, "FullScreen", false); } catch { /* already false */ }
+                    // 窗口态下键盘钩回本地，避免 Win 键仍锁在远程
+                    TrySetKeyboardHookMode(ocx, 0);
+                }
+
+                hostHidden = false;
+                ocxFsActive = false;
+
+                form.SuspendLayout();
+                form.Opacity = 1;
+                form.ShowInTaskbar = true;
+                form.Visible = true;
+                ApplyWindowedChrome(form, deskW, deskH, screenBounds);
+                if (ax != null)
+                {
+                    ax.Dock = DockStyle.Fill;
+                    ax.BringToFront();
+                }
+                form.ResumeLayout(true);
+                form.Show();
+                form.Activate();
+                form.BringToFront();
+                try { NativeFlash.BringToFront(form.Handle); } catch { /* optional */ }
+
+                localDetail += "; restoredWindowed=1";
+            }
+            catch (Exception ex)
+            {
+                localDetail += "; restoreErr=" + ex.Message;
+                // 还原失败则断开，避免永久卡死
+                CloseHost();
+            }
+        }
+
         void EnterOcxFullscreen(object ocx)
         {
-            // KeyboardHookMode: 1=仅全屏时钩到远程（默认）；2=始终钩到远程
             TrySetKeyboardHookMode(ocx, 1);
             try
             {
                 SetComProp(ocx, "FullScreen", true);
+                ocxFsActive = true;
                 localDetail += "; ocxFullScreen=1";
             }
             catch (Exception ex)
@@ -186,11 +226,20 @@ internal static class RdpAxSession
             HideHostAfterOcxFullscreen();
         }
 
+        form.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode == Keys.Escape || (e.Control && e.Shift && e.KeyCode == Keys.F4))
+            {
+                e.Handled = true;
+                CloseHost();
+            }
+        };
+
         form.Shown += (_, _) =>
         {
             try
             {
-                if (wantOcxFullscreen && screenBounds.Width > 0)
+                if (wantOcxFullscreen && screenBounds.Width > 0 && !hostHidden)
                     form.Bounds = screenBounds;
 
                 var ocx = ((OcxHost)ax!).GetOcxObject()
@@ -201,7 +250,6 @@ internal static class RdpAxSession
                 try { SetComProp(ocx, "Domain", host); } catch { /* optional */ }
 
                 TrySetDesktopSize(ocx, deskW, deskH);
-                // Connect 前必须 FullScreen=false；连上后再进全屏
                 try { SetComProp(ocx, "FullScreen", false); } catch { /* optional */ }
                 if (wantOcxFullscreen)
                     TrySetKeyboardHookMode(ocx, 1);
@@ -214,7 +262,8 @@ internal static class RdpAxSession
                     throw new InvalidOperationException("ClearTextPassword unavailable: " + how);
                 localDetail += "; password_set=" + how;
 
-                pollTimer = new System.Windows.Forms.Timer { Interval = 400 };
+                // 较快轮询，及时接住连接栏「窗口化」
+                pollTimer = new System.Windows.Forms.Timer { Interval = 150 };
                 pollTimer.Tick += (_, _) =>
                 {
                     try
@@ -229,7 +278,6 @@ internal static class RdpAxSession
 
                             if (holdConnectedSec > 0)
                             {
-                                pollTimer.Stop();
                                 holdTimer = new System.Windows.Forms.Timer { Interval = Math.Max(1, holdConnectedSec) * 1000 };
                                 holdTimer.Tick += (_, _) =>
                                 {
@@ -244,20 +292,27 @@ internal static class RdpAxSession
                             localDetail += "; disconnected=0";
                             pollTimer.Stop();
                             CloseHost();
+                            return;
                         }
-                        else if (wantOcxFullscreen && connected && hostHidden)
+
+                        if (wantOcxFullscreen && connected)
                         {
-                            // 用户从连接栏退出全屏：把宿主拉回可见，避免黑屏/找不到窗
-                            try
+                            bool fs;
+                            try { fs = Convert.ToBoolean(GetComProp(ocx, "FullScreen")); }
+                            catch { return; }
+
+                            if (ocxFsActive && !fs)
                             {
-                                var fs = Convert.ToBoolean(GetComProp(ocx, "FullScreen"));
-                                if (!fs)
-                                {
-                                    RestoreHostFromHide();
-                                    localDetail += "; leftFullscreen";
-                                }
+                                // 用户点了连接栏「窗口化」
+                                RestoreHostToWindowed(ocx);
                             }
-                            catch { /* ignore */ }
+                            else if (!ocxFsActive && fs && !hostHidden)
+                            {
+                                // 再次进入全屏（若 OCX 支持）
+                                ocxFsActive = true;
+                                HideHostAfterOcxFullscreen();
+                                TrySetKeyboardHookMode(ocx, 1);
+                            }
                         }
                     }
                     catch { /* ignore poll errors */ }
@@ -274,24 +329,6 @@ internal static class RdpAxSession
                 CloseHost();
             }
         };
-
-        void RestoreHostFromHide()
-        {
-            if (!hostHidden || form.IsDisposed) return;
-            hostHidden = false;
-            try
-            {
-                form.Opacity = 1;
-                form.ShowInTaskbar = true;
-                if (screenBounds.Width > 0)
-                    form.Bounds = screenBounds;
-                else
-                    form.ClientSize = new Size(deskW, deskH);
-                form.FormBorderStyle = FormBorderStyle.None;
-                form.Activate();
-            }
-            catch { /* ignore */ }
-        }
 
         form.FormClosing += (_, _) =>
         {
@@ -320,16 +357,37 @@ internal static class RdpAxSession
         return true;
     }
 
+    static void ApplyWindowedChrome(Form form, int deskW, int deskH, Rectangle screenBounds)
+    {
+        form.FormBorderStyle = FormBorderStyle.Sizable;
+        form.ControlBox = true;
+        form.MaximizeBox = true;
+        form.MinimizeBox = true;
+        form.WindowState = FormWindowState.Normal;
+
+        var wa = Screen.PrimaryScreen?.WorkingArea ?? screenBounds;
+        if (wa.Width <= 0) wa = new Rectangle(0, 0, Math.Max(deskW, 1280), Math.Max(deskH, 720));
+
+        // 舒适窗口：不超过工作区 90%，也不小于 1024×640
+        var cw = Math.Min(Math.Max(deskW > 0 && deskW < wa.Width ? deskW : wa.Width * 9 / 10, 1024), wa.Width);
+        var ch = Math.Min(Math.Max(deskH > 0 && deskH < wa.Height ? deskH : wa.Height * 9 / 10, 640), wa.Height);
+        // 从全屏配置还原时 desk 往往等于整屏，强制缩到工作区 90%
+        if (cw >= wa.Width - 16) cw = Math.Max(1024, wa.Width * 9 / 10);
+        if (ch >= wa.Height - 16) ch = Math.Max(640, wa.Height * 9 / 10);
+
+        form.ClientSize = new Size(cw, ch);
+        form.MinimumSize = new Size(640, 480);
+        form.Location = new Point(
+            wa.Left + Math.Max(0, (wa.Width - form.Width) / 2),
+            wa.Top + Math.Max(0, (wa.Height - form.Height) / 2));
+    }
+
     static void TrySetDesktopSize(object ocx, int width, int height)
     {
         try { SetComProp(ocx, "DesktopWidth", width); } catch { /* optional */ }
         try { SetComProp(ocx, "DesktopHeight", height); } catch { /* optional */ }
     }
 
-    /// <summary>
-    /// SecuredSettings / AdvancedSettings2.KeyboardHookMode：
-    /// 0=本地，1=全屏时钩到远程，2=始终钩到远程。
-    /// </summary>
     static void TrySetKeyboardHookMode(object ocx, int mode)
     {
         foreach (var path in new[]
@@ -447,6 +505,21 @@ internal static class RdpAxSession
     {
         public OcxHost(Guid clsid) : base(clsid.ToString("B")) { }
         public object? GetOcxObject() => GetOcx();
+    }
+}
+
+static class NativeFlash
+{
+    [DllImport("user32.dll")]
+    static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    public static void BringToFront(IntPtr hwnd)
+    {
+        ShowWindow(hwnd, 9); // SW_RESTORE
+        SetForegroundWindow(hwnd);
     }
 }
 
