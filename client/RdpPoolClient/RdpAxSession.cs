@@ -210,11 +210,22 @@ internal static class RdpAxSession
             }
         }
 
+        var redirectingMaximize = false;
+
         void EnterOcxFullscreen(object ocx)
         {
             TrySetKeyboardHookMode(ocx, 1);
             try
             {
+                // 勿把 Form.Maximized 当成全屏：先还原 Normal 再交 OCX
+                redirectingMaximize = true;
+                try
+                {
+                    if (form.WindowState != FormWindowState.Normal)
+                        form.WindowState = FormWindowState.Normal;
+                }
+                finally { redirectingMaximize = false; }
+
                 SetComProp(ocx, "FullScreen", true);
                 ocxFsActive = true;
                 localDetail += "; ocxFullScreen=1";
@@ -226,12 +237,36 @@ internal static class RdpAxSession
             HideHostAfterOcxFullscreen();
         }
 
+        // DisplayResolution=fullscreen 会话：标题栏最大化 / 双击标题栏 → 真 OCX FullScreen，不是 Form 最大化
+        form.Resize += (_, _) =>
+        {
+            if (redirectingMaximize || closing || !wantOcxFullscreen || !connected || ocxFsActive)
+                return;
+            if (form.WindowState != FormWindowState.Maximized)
+                return;
+            var ocx = ocxRef;
+            if (ocx == null) return;
+            localDetail += "; maximize→ocxFullscreen";
+            EnterOcxFullscreen(ocx);
+        };
+
         form.KeyDown += (_, e) =>
         {
             if (e.KeyCode == Keys.Escape || (e.Control && e.Shift && e.KeyCode == Keys.F4))
             {
                 e.Handled = true;
                 CloseHost();
+            }
+            // F11：窗口化 ↔ 真 OCX 全屏（仅 fullscreen 配置会话）
+            else if (wantOcxFullscreen && connected && e.KeyCode == Keys.F11)
+            {
+                e.Handled = true;
+                var ocx = ocxRef;
+                if (ocx == null) return;
+                if (ocxFsActive)
+                    RestoreHostToWindowed(ocx);
+                else
+                    EnterOcxFullscreen(ocx);
             }
         };
 
@@ -306,12 +341,10 @@ internal static class RdpAxSession
                                 // 用户点了连接栏「窗口化」
                                 RestoreHostToWindowed(ocx);
                             }
-                            else if (!ocxFsActive && fs && !hostHidden)
+                            else if (!ocxFsActive && fs)
                             {
-                                // 再次进入全屏（若 OCX 支持）
-                                ocxFsActive = true;
-                                HideHostAfterOcxFullscreen();
-                                TrySetKeyboardHookMode(ocx, 1);
+                                // 连接栏/控件再次请求全屏 → 与初次 Connect 相同路径
+                                EnterOcxFullscreen(ocx);
                             }
                         }
                     }
