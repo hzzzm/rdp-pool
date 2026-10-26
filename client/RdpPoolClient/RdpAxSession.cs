@@ -7,6 +7,10 @@ namespace RdpPoolClient;
 /// <summary>
 /// MsTscAx ActiveX：通过 AdvancedSettings*.ClearTextPassword（或 IMsTscNonScriptable）注入明文密码，
 /// 避免 mstsc + CredentialUIBroker 交互框。
+/// <para>
+/// 全屏：只最大化宿主 Form + Dock Fill OCX，<b>绝不</b>设置 MsTscAx.FullScreen=true
+/// （该属性会另开顶层全屏 HWND，留下空白宿主，任务栏出现两个同名窗口）。
+/// </para>
 /// </summary>
 internal static class RdpAxSession
 {
@@ -16,8 +20,8 @@ internal static class RdpAxSession
         "MsTscAx.MsTscAx.9", "MsTscAx.MsTscAx.8", "MsTscAx.MsTscAx"
     };
 
-    /// <param name="holdConnectedSec">Connected 后保持秒数再关窗；0=等到用户关窗。</param>
-    /// <param name="display">本地显示设置；null 则全屏（兼容旧行为）。</param>
+    /// <param name="holdConnectedSec">Connected 后保持秒数再关窗；0=等到用户关窗或会话断开。</param>
+    /// <param name="display">本地显示设置；null 则按本机屏幕最大化宿主。</param>
     public static bool TryConnect(
         string host, int port, string username, string password, int holdConnectedSec,
         out string detail, DisplayApply? display = null)
@@ -73,27 +77,43 @@ internal static class RdpAxSession
 
         var apply = display ?? LocalDisplay.Resolve(LocalDisplay.FullScreen, localW, localH);
 
+        // 全屏 = 最大化单个宿主窗口；窗口化 = 固定 ClientSize。均不调用 OCX.FullScreen。
+        var maximizeHost = apply.FullScreen;
+        var deskW = apply.Width;
+        var deskH = apply.Height;
+        if (maximizeHost)
+        {
+            var wa = Screen.PrimaryScreen?.WorkingArea ?? default;
+            if (wa.Width > 0 && wa.Height > 0)
+            {
+                deskW = wa.Width;
+                deskH = wa.Height;
+            }
+        }
+
         var localDetail = "progid=" + used +
-                          $"; display={(apply.FullScreen ? "fullscreen" : $"{apply.Width}x{apply.Height}")}";
+                          $"; display={(maximizeHost ? $"maximize-host {deskW}x{deskH}" : $"{deskW}x{deskH}")}" +
+                          "; ocxFullScreen=false";
         Exception? connectError = null;
         var connected = false;
+        var closing = false;
 
         var form = new Form
         {
             Text = host + " — RDP Pool",
-            StartPosition = FormStartPosition.CenterScreen
+            StartPosition = FormStartPosition.CenterScreen,
+            // 保留标题栏/系统菜单，便于关闭；全屏用 Maximized，勿 FormBorderStyle.None + OCX.FullScreen
+            FormBorderStyle = FormBorderStyle.Sizable,
+            MinimizeBox = true,
+            MaximizeBox = true,
+            ShowInTaskbar = true
         };
-        if (apply.FullScreen)
-        {
-            form.FormBorderStyle = FormBorderStyle.None;
+
+        if (maximizeHost)
             form.WindowState = FormWindowState.Maximized;
-            form.Bounds = Screen.PrimaryScreen?.Bounds ?? form.Bounds;
-        }
         else
         {
-            form.FormBorderStyle = FormBorderStyle.Sizable;
-            // ClientSize 接近远程桌面尺寸；边框额外高度由系统处理
-            form.ClientSize = new System.Drawing.Size(apply.Width, apply.Height);
+            form.ClientSize = new System.Drawing.Size(deskW, deskH);
             form.MinimumSize = new System.Drawing.Size(640, 480);
         }
 
@@ -113,6 +133,20 @@ internal static class RdpAxSession
         System.Windows.Forms.Timer? pollTimer = null;
         System.Windows.Forms.Timer? holdTimer = null;
 
+        void CloseHost()
+        {
+            if (closing || form.IsDisposed) return;
+            closing = true;
+            try
+            {
+                if (form.InvokeRequired)
+                    form.BeginInvoke(new Action(() => { try { form.Close(); } catch { /* ignore */ } }));
+                else
+                    form.Close();
+            }
+            catch { /* ignore */ }
+        }
+
         form.Shown += (_, _) =>
         {
             try
@@ -123,8 +157,9 @@ internal static class RdpAxSession
                 SetComProp(ocx, "UserName", username);
                 try { SetComProp(ocx, "Domain", host); } catch { /* optional */ }
 
-                TrySetDesktopSize(ocx, apply.Width, apply.Height);
-                TrySetFullScreen(ocx, apply.FullScreen);
+                TrySetDesktopSize(ocx, deskW, deskH);
+                // 关键：不要 Set FullScreen=true —— 会再开一个全屏 HWND，宿主变空白孤儿窗。
+                TryForceOcxWindowed(ocx);
 
                 TrySetPort(ocx, port);
                 TryEnableCredSsp(ocx);
@@ -138,7 +173,7 @@ internal static class RdpAxSession
                     try
                     {
                         var c = Convert.ToInt32(GetComProp(ocx, "Connected"));
-                        // 1 = connected, 2 = connecting
+                        // 1 = connected, 2 = connecting, 0 = not connected
                         if (c == 1 && !connected)
                         {
                             connected = true;
@@ -150,10 +185,17 @@ internal static class RdpAxSession
                                 holdTimer.Tick += (_, _) =>
                                 {
                                     holdTimer.Stop();
-                                    form.Close();
+                                    CloseHost();
                                 };
                                 holdTimer.Start();
                             }
+                        }
+                        else if (connected && c == 0)
+                        {
+                            // 远程会话断开 → 一并关掉宿主，避免空白窗残留
+                            localDetail += "; disconnected=0";
+                            pollTimer.Stop();
+                            CloseHost();
                         }
                     }
                     catch { /* ignore poll errors */ }
@@ -167,12 +209,13 @@ internal static class RdpAxSession
             {
                 connectError = ex;
                 localDetail += "; err=" + ex.Message;
-                form.Close();
+                CloseHost();
             }
         };
 
         form.FormClosing += (_, _) =>
         {
+            closing = true;
             pollTimer?.Stop();
             holdTimer?.Stop();
             try
@@ -202,9 +245,10 @@ internal static class RdpAxSession
         try { SetComProp(ocx, "DesktopHeight", height); } catch { /* optional */ }
     }
 
-    static void TrySetFullScreen(object ocx, bool fullScreen)
+    /// <summary>显式保持嵌入窗口模式，防止控件自行切到 FullScreen 第二表面。</summary>
+    static void TryForceOcxWindowed(object ocx)
     {
-        try { SetComProp(ocx, "FullScreen", fullScreen); } catch { /* optional */ }
+        try { SetComProp(ocx, "FullScreen", false); } catch { /* optional */ }
     }
 
     static bool TrySetClearTextPassword(object ocx, string password, out string how)
