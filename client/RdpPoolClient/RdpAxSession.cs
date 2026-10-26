@@ -87,6 +87,9 @@ internal static class RdpAxSession
         var ocxFsActive = false;
         var closing = false;
         var userConfirmedClose = false;
+        var confirmUiOpen = false; // MessageBox 期间禁止 poll 把全屏误判成「窗口化」
+        // MessageBox 抢焦点后短暂禁止「FullScreen=true → 自动进全屏」（窗口化取消不得副作用回全屏）
+        long suppressAutoFullscreenUntilMs = 0;
         // 冒烟自动退出 / 无 UI：不弹确认
         var skipCloseConfirm =
             holdConnectedSec > 0 ||
@@ -148,23 +151,31 @@ internal static class RdpAxSession
             catch { return false; }
         }
 
-        void ReassertSessionUi()
+        /// <summary>
+        /// 取消关闭后的 UI：仅当取消时仍处于 OCX 全屏才恢复全屏；
+        /// 若已是窗口化，什么都不做（绝不能 EnterOcxFullscreen / FullScreen=true）。
+        /// </summary>
+        void OnCloseCancelled(bool wasOcxFullscreen)
         {
             try
             {
                 if (ocxRef == null || !IsOcxConnected()) return;
-                if (wantOcxFullscreen)
+                if (wasOcxFullscreen)
                 {
                     try { SetComProp(ocxRef, "FullScreen", true); } catch { /* ignore */ }
                     ocxFsActive = true;
-                    hostHidden = false; // 允许再次执行隐藏宿主
+                    hostHidden = false; // 允许 HideHost 再跑一次
                     HideHostAfterOcxFullscreen();
                     BringRdpToFront(ocxRef);
+                    return;
                 }
-                else
-                {
+
+                // 窗口化取消：保持窗口化。禁止回全屏；压住 MessageBox 抢焦点带来的误 FullScreen=true。
+                suppressAutoFullscreenUntilMs = Environment.TickCount64 + 1500;
+                ocxFsActive = false;
+                try { SetComProp(ocxRef, "FullScreen", false); } catch { /* ignore */ }
+                if (!form.IsDisposed && form.Opacity > 0.5 && form.FormBorderStyle != FormBorderStyle.None)
                     ForegroundUtil.Activate(form);
-                }
             }
             catch { /* ignore */ }
         }
@@ -172,12 +183,35 @@ internal static class RdpAxSession
         bool ConfirmDisconnectUi()
         {
             if (skipCloseConfirm || userConfirmedClose) return true;
+            confirmUiOpen = true;
+            Form? topOwner = null;
             try
             {
-                // 全屏宿主已藏时不要用 form 作 owner（点不到）；用无 owner 顶层框
-                var useOwner = !hostHidden && !form.IsDisposed && form.Visible && form.Opacity > 0.5;
-                var r = useOwner
-                    ? MessageBox.Show(form, "确定要断开远程桌面并退出吗？", "RDP 资源池客户端",
+                // OCX 全屏 HWND 会盖住普通 MessageBox：用 TopMost 空 owner 保证中文确认可见
+                var needTopMost = ocxFsActive || hostHidden
+                                  || form.IsDisposed || !form.Visible || form.Opacity < 0.5;
+                if (needTopMost)
+                {
+                    topOwner = new Form
+                    {
+                        Text = "RDP 资源池客户端",
+                        ShowInTaskbar = false,
+                        FormBorderStyle = FormBorderStyle.None,
+                        StartPosition = FormStartPosition.Manual,
+                        Bounds = new Rectangle(-32000, -32000, 1, 1),
+                        TopMost = true,
+                        Opacity = 0
+                    };
+                    topOwner.Show();
+                    topOwner.TopMost = true;
+                }
+
+                IWin32Window? owner = topOwner;
+                if (owner == null && !form.IsDisposed && form.Visible && form.Opacity > 0.5)
+                    owner = form;
+
+                var r = owner != null
+                    ? MessageBox.Show(owner, "确定要断开远程桌面并退出吗？", "RDP 资源池客户端",
                         MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2)
                     : MessageBox.Show("确定要断开远程桌面并退出吗？", "RDP 资源池客户端",
                         MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
@@ -185,19 +219,30 @@ internal static class RdpAxSession
             }
             catch
             {
-                return true;
+                // 确认框失败时不要静默断开（全屏 X 尤其危险）
+                return false;
+            }
+            finally
+            {
+                confirmUiOpen = false;
+                if (topOwner != null)
+                {
+                    try { topOwner.Close(); } catch { /* ignore */ }
+                    try { topOwner.Dispose(); } catch { /* ignore */ }
+                }
             }
         }
 
-        /// <summary>用户主动退出：先确认（仍保持连接），是才关窗；否则恢复全屏/前台。</summary>
+        /// <summary>用户主动退出：先确认（仍保持连接），是才关窗；取消则保持当前模式。</summary>
         void CloseHost(bool askConfirm = true)
         {
             if (closing || form.IsDisposed) return;
             if (askConfirm)
             {
+                var wasFs = ocxFsActive;
                 if (!ConfirmDisconnectUi())
                 {
-                    ReassertSessionUi();
+                    OnCloseCancelled(wasFs);
                     return;
                 }
                 userConfirmedClose = true;
@@ -391,6 +436,7 @@ internal static class RdpAxSession
 
                 TrySetPort(ocx, port);
                 TryEnableCredSsp(ocx);
+                TryEnableDisplayConnectionBar(ocx); // 连接栏 X → OnConfirmClose
                 if (!TrySetClearTextPassword(ocx, password, out var how))
                     throw new InvalidOperationException("ClearTextPassword unavailable: " + how);
                 localDetail += "; password_set=" + how;
@@ -438,7 +484,8 @@ internal static class RdpAxSession
                             return;
                         }
 
-                        if (wantOcxFullscreen && connected)
+                        // 确认框弹出期间勿处理全屏切换（避免 MessageBox 抢焦点导致误「窗口化」/误回全屏）
+                        if (wantOcxFullscreen && connected && !confirmUiOpen)
                         {
                             bool fs;
                             try { fs = Convert.ToBoolean(GetComProp(ocx, "FullScreen")); }
@@ -451,8 +498,16 @@ internal static class RdpAxSession
                             }
                             else if (!ocxFsActive && fs)
                             {
-                                // 连接栏/控件再次请求全屏 → 与初次 Connect 相同路径
-                                EnterOcxFullscreen(ocx);
+                                // MessageBox 抢焦点后 OCX 可能误报 FullScreen=true —— 窗口化会话勿跟进
+                                if (Environment.TickCount64 < suppressAutoFullscreenUntilMs)
+                                {
+                                    try { SetComProp(ocx, "FullScreen", false); } catch { /* ignore */ }
+                                }
+                                else
+                                {
+                                    // 连接栏/最大化/F11 合法再进全屏
+                                    EnterOcxFullscreen(ocx);
+                                }
                             }
                         }
                     }
@@ -460,38 +515,39 @@ internal static class RdpAxSession
                 };
                 pollTimer.Start();
 
-                // 连接栏关闭/断开：在仍连接时 OnConfirmClose 先问；否可取消
+                // 连接栏 X/关闭：OnConfirmClose 在 Disconnect 前询问（全屏时尤其关键）
                 eventAdvise = MsTscEvents.AdviseConfirmClose(ocx, () =>
                 {
                     if (skipCloseConfirm || userConfirmedClose) return true;
-                    var ok = false;
+                    // 以当前是否 OCX 全屏为准（勿用 hostHidden 误判窗口化）
+                    var wasFs = ocxFsActive;
+                    bool ok;
                     try
                     {
-                        if (form.InvokeRequired)
-                        {
-                            form.Invoke(new Action(() => { ok = ConfirmDisconnectUi(); }));
-                        }
-                        else
-                            ok = ConfirmDisconnectUi();
+                        // MsTsc 事件多在 UI STA；同步 Invoke 易与 COM 重入死锁 → 直接弹
+                        ok = ConfirmDisconnectUi();
                     }
-                    catch { ok = true; }
+                    catch { ok = false; } // 失败则拒绝关闭，避免无确认断开
 
                     if (ok)
                     {
                         userConfirmedClose = true;
                         localDetail += "; confirmClose=yes";
-                        return true;
+                        return true; // 允许 OCX 关闭 → 随后 Disconnect
                     }
                     localDetail += "; confirmClose=no";
-                    // 下一消息泵周期恢复全屏/前台
                     try
                     {
-                        form.BeginInvoke(new Action(ReassertSessionUi));
+                        if (!form.IsDisposed)
+                            form.BeginInvoke(new Action(() => OnCloseCancelled(wasFs)));
+                        else
+                            OnCloseCancelled(wasFs);
                     }
-                    catch { ReassertSessionUi(); }
-                    return false;
+                    catch { OnCloseCancelled(wasFs); }
+                    return false; // 拒绝关闭，会话继续
                 });
                 if (eventAdvise != null) localDetail += "; onConfirmClose=advised";
+                else localDetail += "; onConfirmClose=adviseFailed";
 
                 InvokeCom(ocx, "Connect");
                 localDetail += "; connect_called";
@@ -507,13 +563,14 @@ internal static class RdpAxSession
 
         form.FormClosing += (_, e) =>
         {
-            // 必须在 Disconnect 之前确认；否=取消并保持会话
+            // 必须在 Disconnect 之前确认；取消：e.Cancel=true，窗口化保持窗口化
             if (!userConfirmedClose && !skipCloseConfirm)
             {
+                var wasFs = ocxFsActive; // 弹确认前快照；窗口化时为 false → 取消不回全屏
                 if (IsOcxConnected() && !ConfirmDisconnectUi())
                 {
                     e.Cancel = true;
-                    ReassertSessionUi();
+                    OnCloseCancelled(wasFs);
                     return;
                 }
                 userConfirmedClose = true;
@@ -625,6 +682,21 @@ internal static class RdpAxSession
                 var adv = GetComProp(ocx, prop);
                 if (adv == null) continue;
                 SetComProp(adv, "EnableCredSspSupport", true);
+                return;
+            }
+            catch { /* try next */ }
+        }
+    }
+
+    static void TryEnableDisplayConnectionBar(object ocx)
+    {
+        foreach (var prop in new[] { "AdvancedSettings9", "AdvancedSettings8", "AdvancedSettings7", "AdvancedSettings2", "AdvancedSettings" })
+        {
+            try
+            {
+                var adv = GetComProp(ocx, prop);
+                if (adv == null) continue;
+                SetComProp(adv, "DisplayConnectionBar", true);
                 return;
             }
             catch { /* try next */ }
