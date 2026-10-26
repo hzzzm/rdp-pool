@@ -16,6 +16,8 @@
 2. **保存前会调用控制面登录校验**；失败则不写配置并提示中文错误  
 3. 双击 **`RdpPoolClient.exe`** 登录并分配资源（托盘会显示应用图标）  
 
+**本地显示分辨率**（类似 mstsc「显示」，不上传服务器）：`appsettings.json` 字段 `DisplayResolution`（`fullscreen` / `match_local` / `1280x720` 等）。可在 Setup 下拉框用「仅保存显示」修改，或在客户端运行中托盘右键「显示分辨率…」——**无需重新登录**。连接时写入 MsTscAx `DesktopWidth`/`DesktopHeight`/`FullScreen` 与 `.rdp` 的 `screen mode id` / `desktopwidth` / `desktopheight`。
+
 包内已带运行时，**不必安装 .NET**。无 `启动.cmd`。应用图标见 `assets/app.ico`（16/32/48/256）。
 `RdpPoolClient.exe` / `RdpPoolSetup.exe` 为 **WinExe**（无黑色 CMD）。日志：`rdp-pool-client.log`。
 

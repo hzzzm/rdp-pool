@@ -194,6 +194,8 @@ Win11 对「发布者未验证」的程序可能直接拦截。本包使用【�
 
 - ApiBaseUrl / LoginProtected / PasswordProtected：由 Setup 在登录校验成功后写入
 - SkipMstsc / AutoRelease / PreferredGroupId / ConnectHoldSec：非敏感项
+- DisplayResolution：本地显示（fullscreen / match_local / 1280x720 等），不上传服务器
+  可在 Setup「显示分辨率」+「仅保存显示」、或客户端托盘菜单「显示分辨率…」修改，无需重新登录
 
 控制面需已启动。仅 Windows x64。账密 DPAPI 与 Windows 用户绑定。
 '@ | Set-Content (Join-Path $Stage "README.txt") -Encoding UTF8

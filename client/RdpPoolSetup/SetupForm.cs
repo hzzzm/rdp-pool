@@ -7,10 +7,12 @@ sealed class SetupForm : Form
     readonly TextBox _apiUrl = new() { Width = 360 };
     readonly TextBox _login = new() { Width = 360 };
     readonly TextBox _password = new() { Width = 360, UseSystemPasswordChar = true };
+    readonly ComboBox _display = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 360 };
     readonly CheckBox _skipMstsc = new() { Text = "仅验证 API（不启动远程桌面）", AutoSize = true };
     readonly CheckBox _autoRelease = new() { Text = "退出时自动释放会话", AutoSize = true, Checked = true };
     readonly Label _status = new() { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(420, 0) };
     readonly Button _btnSave = new() { Text = "保存", Width = 90, Height = 28 };
+    readonly Button _btnSaveDisplay = new() { Text = "仅保存显示", Width = 100, Height = 28 };
     readonly Button _btnCancel = new() { Text = "取消", Width = 90, Height = 28 };
     readonly string _configPath;
     bool _busy;
@@ -24,7 +26,7 @@ sealed class SetupForm : Form
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(460, 320);
+        ClientSize = new Size(460, 400);
         Font = new Font("Microsoft YaHei UI", 9F);
         try
         {
@@ -35,12 +37,17 @@ sealed class SetupForm : Form
             Icon = SystemIcons.Application;
         }
 
+        foreach (var (value, label) in LocalDisplay.Options)
+            _display.Items.Add(new DisplayOpt(value, label));
+        _display.DisplayMember = nameof(DisplayOpt.Label);
+        _display.ValueMember = nameof(DisplayOpt.Value);
+
         var layout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             Padding = new Padding(16),
             ColumnCount = 2,
-            RowCount = 8
+            RowCount = 10
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -61,11 +68,12 @@ sealed class SetupForm : Form
         AddRow(0, "服务器地址", _apiUrl);
         AddRow(1, "用户名", _login);
         AddRow(2, "密码", _password);
+        AddRow(3, "显示分辨率", _display);
 
         layout.SetColumnSpan(_skipMstsc, 2);
-        layout.Controls.Add(_skipMstsc, 0, 3);
+        layout.Controls.Add(_skipMstsc, 0, 4);
         layout.SetColumnSpan(_autoRelease, 2);
-        layout.Controls.Add(_autoRelease, 0, 4);
+        layout.Controls.Add(_autoRelease, 0, 5);
 
         var buttons = new FlowLayoutPanel
         {
@@ -74,26 +82,28 @@ sealed class SetupForm : Form
             WrapContents = false
         };
         _btnSave.Click += async (_, _) => await SaveAsync();
+        _btnSaveDisplay.Click += (_, _) => SaveDisplayOnly();
         _btnCancel.Click += (_, _) => Close();
         AcceptButton = _btnSave;
         CancelButton = _btnCancel;
         buttons.Controls.Add(_btnSave);
+        buttons.Controls.Add(_btnSaveDisplay);
         buttons.Controls.Add(_btnCancel);
         layout.SetColumnSpan(buttons, 2);
-        layout.Controls.Add(buttons, 0, 5);
+        layout.Controls.Add(buttons, 0, 6);
 
         layout.SetColumnSpan(_status, 2);
-        layout.Controls.Add(_status, 0, 6);
+        layout.Controls.Add(_status, 0, 7);
 
         var hint = new Label
         {
-            Text = "保存前会先向控制面校验账密；通过后才用本机 DPAPI 加密写入 appsettings.json。",
+            Text = "「保存」会先校验账密再加密写入。「仅保存显示」只改本机分辨率，无需重新登录。",
             AutoSize = true,
             MaximumSize = new Size(420, 0),
             ForeColor = Color.Gray
         };
         layout.SetColumnSpan(hint, 2);
-        layout.Controls.Add(hint, 0, 7);
+        layout.Controls.Add(hint, 0, 8);
 
         Controls.Add(layout);
         LoadExisting();
@@ -107,9 +117,32 @@ sealed class SetupForm : Form
         return ClientConfigStore.DefaultPath;
     }
 
+    void SelectDisplay(string? value)
+    {
+        var n = LocalDisplay.Normalize(value);
+        for (var i = 0; i < _display.Items.Count; i++)
+        {
+            if (_display.Items[i] is DisplayOpt o && o.Value == n)
+            {
+                _display.SelectedIndex = i;
+                return;
+            }
+        }
+        if (_display.Items.Count > 0)
+            _display.SelectedIndex = 0;
+    }
+
+    string SelectedDisplayValue()
+    {
+        if (_display.SelectedItem is DisplayOpt o)
+            return o.Value;
+        return LocalDisplay.Default;
+    }
+
     void LoadExisting()
     {
         _apiUrl.Text = "http://127.0.0.1:8081";
+        SelectDisplay(LocalDisplay.Default);
         if (!File.Exists(_configPath))
         {
             _status.Text = "尚未配置，将新建：" + _configPath;
@@ -119,7 +152,8 @@ sealed class SetupForm : Form
         var existing = ClientConfigStore.TryLoadExisting(_configPath);
         if (existing == null)
         {
-            _status.Text = "已有配置文件但无法完整读取，请重新填写账密。";
+            SelectDisplay(ClientConfigStore.ReadDisplayResolution(_configPath));
+            _status.Text = "已有配置文件但无法完整读取，请重新填写账密。显示设置仍可单独保存。";
             return;
         }
 
@@ -128,22 +162,46 @@ sealed class SetupForm : Form
         _password.Text = existing.Password;
         _skipMstsc.Checked = existing.SkipMstsc;
         _autoRelease.Checked = existing.AutoRelease;
+        SelectDisplay(existing.DisplayResolution);
         _status.Text = string.IsNullOrEmpty(existing.Password) && string.IsNullOrEmpty(existing.Login)
             ? "已加载服务器地址；请填写用户名和密码后保存。"
-            : "已加载现有配置（保存前仍会重新校验登录）。";
+            : "已加载现有配置（「保存」仍会重新校验登录；改分辨率可用「仅保存显示」）。";
     }
 
     void SetBusy(bool busy)
     {
         _busy = busy;
         _btnSave.Enabled = !busy;
+        _btnSaveDisplay.Enabled = !busy;
         _btnCancel.Enabled = !busy;
         _apiUrl.Enabled = !busy;
         _login.Enabled = !busy;
         _password.Enabled = !busy;
+        _display.Enabled = !busy;
         _skipMstsc.Enabled = !busy;
         _autoRelease.Enabled = !busy;
         UseWaitCursor = busy;
+    }
+
+    void SaveDisplayOnly()
+    {
+        if (_busy) return;
+        try
+        {
+            ClientConfigStore.PatchDisplayResolution(_configPath, SelectedDisplayValue());
+            _status.ForeColor = Color.ForestGreen;
+            _status.Text = "已保存显示设置（未改动账密）：" + LocalDisplay.LabelFor(SelectedDisplayValue());
+            MessageBox.Show(this,
+                "显示分辨率已保存到本机配置。\n无需重新登录。\n\n下次连接远程桌面时生效。",
+                "已保存显示设置",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, "保存显示设置失败：\n" + ex.Message, "错误",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     async Task SaveAsync()
@@ -233,6 +291,7 @@ sealed class SetupForm : Form
         baseSettings.Password = password;
         baseSettings.SkipMstsc = _skipMstsc.Checked;
         baseSettings.AutoRelease = _autoRelease.Checked;
+        baseSettings.DisplayResolution = SelectedDisplayValue();
 
         try
         {
@@ -277,4 +336,6 @@ sealed class SetupForm : Form
             // ignore rollback errors
         }
     }
+
+    sealed record DisplayOpt(string Value, string Label);
 }

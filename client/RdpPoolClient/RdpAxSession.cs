@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
+using RdpPool.Config;
 
 namespace RdpPoolClient;
 
@@ -16,7 +17,10 @@ internal static class RdpAxSession
     };
 
     /// <param name="holdConnectedSec">Connected 后保持秒数再关窗；0=等到用户关窗。</param>
-    public static bool TryConnect(string host, int port, string username, string password, int holdConnectedSec, out string detail)
+    /// <param name="display">本地显示设置；null 则全屏（兼容旧行为）。</param>
+    public static bool TryConnect(
+        string host, int port, string username, string password, int holdConnectedSec,
+        out string detail, DisplayApply? display = null)
     {
         detail = "";
         Type? prog = null;
@@ -54,16 +58,45 @@ internal static class RdpAxSession
         }
         catch { /* may already be set */ }
 
-        var localDetail = "progid=" + used;
+        var localW = 1920;
+        var localH = 1080;
+        try
+        {
+            var bounds = Screen.PrimaryScreen?.Bounds ?? default;
+            if (bounds.Width > 0 && bounds.Height > 0)
+            {
+                localW = bounds.Width;
+                localH = bounds.Height;
+            }
+        }
+        catch { /* keep defaults */ }
+
+        var apply = display ?? LocalDisplay.Resolve(LocalDisplay.FullScreen, localW, localH);
+
+        var localDetail = "progid=" + used +
+                          $"; display={(apply.FullScreen ? "fullscreen" : $"{apply.Width}x{apply.Height}")}";
         Exception? connectError = null;
         var connected = false;
-        using var form = new Form
+
+        var form = new Form
         {
             Text = host + " — RDP Pool",
-            Width = 1280,
-            Height = 800,
             StartPosition = FormStartPosition.CenterScreen
         };
+        if (apply.FullScreen)
+        {
+            form.FormBorderStyle = FormBorderStyle.None;
+            form.WindowState = FormWindowState.Maximized;
+            form.Bounds = Screen.PrimaryScreen?.Bounds ?? form.Bounds;
+        }
+        else
+        {
+            form.FormBorderStyle = FormBorderStyle.Sizable;
+            // ClientSize 接近远程桌面尺寸；边框额外高度由系统处理
+            form.ClientSize = new System.Drawing.Size(apply.Width, apply.Height);
+            form.MinimumSize = new System.Drawing.Size(640, 480);
+        }
+
         AxHost? ax = null;
         try
         {
@@ -72,6 +105,7 @@ internal static class RdpAxSession
         }
         catch (Exception ex)
         {
+            form.Dispose();
             detail = localDetail + "; AxHost=" + ex.Message;
             return false;
         }
@@ -88,6 +122,9 @@ internal static class RdpAxSession
                 SetComProp(ocx, "Server", host);
                 SetComProp(ocx, "UserName", username);
                 try { SetComProp(ocx, "Domain", host); } catch { /* optional */ }
+
+                TrySetDesktopSize(ocx, apply.Width, apply.Height);
+                TrySetFullScreen(ocx, apply.FullScreen);
 
                 TrySetPort(ocx, port);
                 TryEnableCredSsp(ocx);
@@ -149,11 +186,25 @@ internal static class RdpAxSession
             catch { /* ignore */ }
         };
 
-        Application.Run(form);
+        using (form)
+        {
+            Application.Run(form);
+        }
         detail = localDetail;
         if (connectError != null) return false;
         if (holdConnectedSec > 0) return connected;
         return true;
+    }
+
+    static void TrySetDesktopSize(object ocx, int width, int height)
+    {
+        try { SetComProp(ocx, "DesktopWidth", width); } catch { /* optional */ }
+        try { SetComProp(ocx, "DesktopHeight", height); } catch { /* optional */ }
+    }
+
+    static void TrySetFullScreen(object ocx, bool fullScreen)
+    {
+        try { SetComProp(ocx, "FullScreen", fullScreen); } catch { /* optional */ }
     }
 
     static bool TrySetClearTextPassword(object ocx, string password, out string how)

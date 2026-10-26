@@ -39,7 +39,8 @@ public static class ClientConfigStore
             ClientInstanceId = file.ClientInstanceId ?? "",
             SkipMstsc = file.SkipMstsc,
             AutoRelease = file.AutoRelease,
-            ConnectHoldSec = file.ConnectHoldSec
+            ConnectHoldSec = file.ConnectHoldSec,
+            DisplayResolution = LocalDisplay.Normalize(file.DisplayResolution)
         };
 
         var hadPlainLogin = !string.IsNullOrEmpty(file.Login);
@@ -103,7 +104,8 @@ public static class ClientConfigStore
             ClientInstanceId = settings.ClientInstanceId ?? "",
             SkipMstsc = settings.SkipMstsc,
             AutoRelease = settings.AutoRelease,
-            ConnectHoldSec = settings.ConnectHoldSec
+            ConnectHoldSec = settings.ConnectHoldSec,
+            DisplayResolution = LocalDisplay.Normalize(settings.DisplayResolution)
         };
 
         var dir = Path.GetDirectoryName(path);
@@ -140,13 +142,60 @@ public static class ClientConfigStore
                     ClientInstanceId = file.ClientInstanceId ?? "",
                     SkipMstsc = file.SkipMstsc,
                     AutoRelease = file.AutoRelease,
-                    ConnectHoldSec = file.ConnectHoldSec
+                    ConnectHoldSec = file.ConnectHoldSec,
+                    DisplayResolution = LocalDisplay.Normalize(file.DisplayResolution)
                 };
             }
             catch
             {
                 return null;
             }
+        }
+    }
+
+    /// <summary>
+    /// 仅更新本地显示分辨率，保留 LoginProtected/PasswordProtected 等字段原样写入。
+    /// 不校验登录、不重加密账密。
+    /// </summary>
+    public static void PatchDisplayResolution(string path, string displayResolution)
+    {
+        var normalized = LocalDisplay.Normalize(displayResolution);
+        ClientConfigFile file;
+        if (File.Exists(path))
+        {
+            file = JsonSerializer.Deserialize<ClientConfigFile>(File.ReadAllText(path), ReadOpts)
+                   ?? new ClientConfigFile();
+        }
+        else
+        {
+            file = new ClientConfigFile();
+        }
+
+        file.DisplayResolution = normalized;
+
+        var dir = Path.GetDirectoryName(path);
+        if (!string.IsNullOrEmpty(dir))
+            Directory.CreateDirectory(dir);
+
+        var tmp = path + ".tmp";
+        File.WriteAllText(tmp, JsonSerializer.Serialize(file, WriteOpts));
+        File.Copy(tmp, path, overwrite: true);
+        try { File.Delete(tmp); } catch { /* ignore */ }
+    }
+
+    /// <summary>读取当前存盘的显示分辨率（文件不存在或无效时返回默认全屏）。</summary>
+    public static string ReadDisplayResolution(string path)
+    {
+        if (!File.Exists(path))
+            return LocalDisplay.Default;
+        try
+        {
+            var file = JsonSerializer.Deserialize<ClientConfigFile>(File.ReadAllText(path), ReadOpts);
+            return LocalDisplay.Normalize(file?.DisplayResolution);
+        }
+        catch
+        {
+            return LocalDisplay.Default;
         }
     }
 }

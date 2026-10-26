@@ -25,6 +25,11 @@ public sealed class ClientConfigFile
 
     /// <summary>ActiveX/mstsc 连通后保持秒数再退出（冒烟用）；0=交互等待。</summary>
     public int ConnectHoldSec { get; set; }
+
+    /// <summary>
+    /// 本地显示分辨率：fullscreen | match_local | 1280x720 等。明文非敏感；不上传服务器。
+    /// </summary>
+    public string? DisplayResolution { get; set; }
 }
 
 /// <summary>运行时已解密的配置。</summary>
@@ -39,6 +44,9 @@ public sealed class ClientSettings
     public bool SkipMstsc { get; set; }
     public bool AutoRelease { get; set; } = true;
     public int ConnectHoldSec { get; set; }
+
+    /// <summary>本地显示：fullscreen | match_local | WxH。默认全屏（与旧版 .rdp screen mode id:2 一致）。</summary>
+    public string DisplayResolution { get; set; } = "fullscreen";
 
     /// <summary>本次加载是否从明文 Login/Password 迁到了 Protected 字段。</summary>
     public bool MigratedFromPlaintext { get; set; }

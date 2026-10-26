@@ -73,7 +73,26 @@ var login = await loginResp.Content.ReadFromJsonAsync<LoginResponse>(jsonOpts);
 http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", login!.AccessToken);
 Console.WriteLine("登录成功");
 
-using var tray = RdpPoolClient.TrayPresence.Start("RDP 资源池客户端");
+using var tray = RdpPoolClient.TrayPresence.Start("RDP 资源池客户端", cfgPath);
+
+var localW = 1920;
+var localH = 1080;
+try
+{
+    var b = Screen.PrimaryScreen?.Bounds;
+    if (b is { Width: > 0, Height: > 0 })
+    {
+        localW = b.Value.Width;
+        localH = b.Value.Height;
+    }
+}
+catch { /* keep defaults */ }
+// 启动前再读一次磁盘，允许托盘/Setup「仅保存显示」在选组阶段生效
+var displayResolution = ClientConfigStore.ReadDisplayResolution(cfgPath);
+var displayApply = LocalDisplay.Resolve(displayResolution, localW, localH);
+Console.WriteLine($"本地显示: {LocalDisplay.LabelFor(displayResolution)} " +
+                  $"→ mode={displayApply.ScreenModeId} {displayApply.Width}x{displayApply.Height}" +
+                  (displayApply.FullScreen ? " fullscreen" : ""));
 
 var groupsResp = await http.GetFromJsonAsync<GroupsResponse>("api/v1/groups/available", jsonOpts);
 var groups = groupsResp?.Groups ?? new List<GroupItem>();
@@ -191,10 +210,16 @@ try
     else if (!hasPass)
     {
         Console.WriteLine("票据无密码（服务端未配置资源凭据）。将用 mstsc /v 打开，需手动输入密码。");
+        // 启动前再读显示设置（托盘可能刚改过）
+        displayResolution = ClientConfigStore.ReadDisplayResolution(cfgPath);
+        displayApply = LocalDisplay.Resolve(displayResolution, localW, localH);
+        var mstscArgs = displayApply.FullScreen
+            ? $"/v:{ticket.Host}:{ticket.Port} /f"
+            : $"/v:{ticket.Host}:{ticket.Port} /w:{displayApply.Width} /h:{displayApply.Height}";
         Process.Start(new ProcessStartInfo
         {
             FileName = "mstsc",
-            Arguments = $"/v:{ticket.Host}:{ticket.Port}",
+            Arguments = mstscArgs,
             UseShellExecute = true
         });
     }
@@ -203,9 +228,14 @@ try
         var localUser = RdpLaunch.FormatLocalRdpUser(ticket.Host, ticket.Username);
         RdpLaunch.PrepareTrustedServer(ticket.Host, localUser);
 
+        // 启动前再读显示设置（托盘/Setup 可能刚改过）
+        displayResolution = ClientConfigStore.ReadDisplayResolution(cfgPath);
+        displayApply = LocalDisplay.Resolve(displayResolution, localW, localH);
+        Console.WriteLine($"应用显示: {LocalDisplay.LabelFor(displayResolution)}");
+
         // .rdp（password 51 DPAPI）+ cmdkey；ActiveX ClearTextPassword 为主路径，避免 CredentialUIBroker
         rdpPath = Path.Combine(Path.GetTempPath(), $"rdp-pool-{session?.Id ?? Guid.NewGuid().ToString("N")}.rdp");
-        await File.WriteAllTextAsync(rdpPath, RdpLaunch.BuildRdpFile(ticket), Encoding.ASCII);
+        await File.WriteAllTextAsync(rdpPath, RdpLaunch.BuildRdpFile(ticket, displayApply), Encoding.ASCII);
 
         var users = new[] { ticket.Username, localUser }.Distinct(StringComparer.OrdinalIgnoreCase);
         cmdTargets.Add($"TERMSRV/{ticket.Host}");
@@ -228,7 +258,7 @@ try
         var axThread = new Thread(() =>
         {
             axOk = RdpPoolClient.RdpAxSession.TryConnect(
-                ticket.Host, port, ticket.Username, ticket.Password, holdSec, out axDetail);
+                ticket.Host, port, ticket.Username, ticket.Password, holdSec, out axDetail, displayApply);
         });
         axThread.SetApartmentState(ApartmentState.STA);
         axThread.Start();
@@ -347,7 +377,7 @@ static class RdpLaunch
         p?.WaitForExit(10000);
     }
 
-    public static string BuildRdpFile(Ticket ticket)
+    public static string BuildRdpFile(Ticket ticket, DisplayApply display)
     {
         // username 用 host\user，配合 cmdkey TERMSRV 目标，减少「用其他账户」框
         var user = FormatLocalRdpUser(ticket.Host, ticket.Username);
@@ -362,7 +392,10 @@ static class RdpLaunch
             "negotiate security layer:i:1",
             "username:s:" + user,
             "domain:s:",
-            "screen mode id:i:2",
+            // 本地显示（与 mstsc Display / MsTscAx DesktopWidth|Height|FullScreen 对齐）
+            "screen mode id:i:" + display.ScreenModeId,
+            "desktopwidth:i:" + display.Width,
+            "desktopheight:i:" + display.Height,
             "autoreconnection enabled:i:1",
         };
         if (!string.IsNullOrEmpty(ticket.Password))
