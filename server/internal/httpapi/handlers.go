@@ -106,10 +106,21 @@ func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request, claims *a
 	writeJSON(w, http.StatusOK, res)
 }
 
-func (s *Server) handleClaimStub(w http.ResponseWriter, r *http.Request, claims *auth.Claims) {
-	writeJSON(w, http.StatusNotImplemented, map[string]string{
-		"error": "claim path stub — queue offer → session conversion next",
-	})
+func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request, claims *auth.Claims) {
+	var body struct {
+		ClientInstanceID string `json:"client_instance_id"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	res, err := s.Pool.Claim(r.Context(), claims.UserID, body.ClientInstanceID)
+	if err != nil {
+		mapSvcErr(w, err)
+		return
+	}
+	status := http.StatusOK
+	if res.Status == "queued" {
+		status = http.StatusAccepted
+	}
+	writeJSON(w, status, res)
 }
 
 func (s *Server) handleQueueMe(w http.ResponseWriter, r *http.Request, claims *auth.Claims) {
@@ -239,15 +250,55 @@ func (s *Server) handleAdminCreateGroup(w http.ResponseWriter, r *http.Request, 
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 
+func (s *Server) handleAdminUpdateGroup(w http.ResponseWriter, r *http.Request, claims *auth.Claims) {
+	id := r.PathValue("id")
+	var body struct {
+		Code        string `json:"code"`
+		Name        string `json:"name"`
+		SortOrder   int    `json:"sort_order"`
+		Description string `json:"description"`
+		Enabled     *bool  `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || id == "" || body.Code == "" || body.Name == "" {
+		writeErr(w, http.StatusBadRequest, "code and name required")
+		return
+	}
+	enabled := 1
+	if body.Enabled != nil && !*body.Enabled {
+		enabled = 0
+	} else if body.Enabled == nil {
+		var cur int
+		_ = s.Store.DB.QueryRowContext(r.Context(), `SELECT enabled FROM resource_groups WHERE id=?`, id).Scan(&cur)
+		enabled = cur
+	}
+	res, err := s.Store.DB.ExecContext(r.Context(), `
+		UPDATE resource_groups SET code=?, name=?, sort_order=?, description=?, enabled=?, updated_at=NOW(3)
+		WHERE id=?`, body.Code, body.Name, body.SortOrder, body.Description, enabled, id)
+	if err != nil {
+		mapSvcErr(w, err)
+		return
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	_ = s.Store.InsertAudit(r.Context(), "admin", claims.UserID, "group_update", "group", id, "", nil)
+	writeJSON(w, http.StatusOK, map[string]string{"id": id, "status": "updated"})
+}
+
 func (s *Server) handleAdminListResources(w http.ResponseWriter, r *http.Request, _ *auth.Claims) {
 	groupID := r.URL.Query().Get("group_id")
-	q := `SELECT id, group_id, name, host, rdp_port, status, linger_hint, enabled FROM resources`
+	q := `
+		SELECT r.id, r.group_id, COALESCE(g.name,''), r.name, r.host, r.rdp_port, r.status, r.linger_hint, r.enabled
+		FROM resources r
+		LEFT JOIN resource_groups g ON g.id = r.group_id`
 	args := []any{}
 	if groupID != "" {
-		q += ` WHERE group_id = ?`
+		q += ` WHERE r.group_id = ?`
 		args = append(args, groupID)
 	}
-	q += ` ORDER BY name`
+	q += ` ORDER BY g.sort_order, g.name, r.name`
 	rows, err := s.Store.DB.QueryContext(r.Context(), q, args...)
 	if err != nil {
 		mapSvcErr(w, err)
@@ -255,15 +306,15 @@ func (s *Server) handleAdminListResources(w http.ResponseWriter, r *http.Request
 	}
 	defer rows.Close()
 	type res struct {
-		ID, GroupID, Name, Host, Status string
-		RDPPort                         int
-		LingerHint, Enabled             bool
+		ID, GroupID, GroupName, Name, Host, Status string
+		RDPPort                                    int
+		LingerHint, Enabled                        bool
 	}
 	var list []res
 	for rows.Next() {
 		var item res
 		var linger, en int
-		if err := rows.Scan(&item.ID, &item.GroupID, &item.Name, &item.Host, &item.RDPPort, &item.Status, &linger, &en); err != nil {
+		if err := rows.Scan(&item.ID, &item.GroupID, &item.GroupName, &item.Name, &item.Host, &item.RDPPort, &item.Status, &linger, &en); err != nil {
 			mapSvcErr(w, err)
 			return
 		}
@@ -305,6 +356,49 @@ func (s *Server) handleAdminCreateResource(w http.ResponseWriter, r *http.Reques
 	}
 	_ = s.Store.InsertAudit(r.Context(), "admin", claims.UserID, "resource_create", "resource", id, "", nil)
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
+}
+
+func (s *Server) handleAdminUpdateResource(w http.ResponseWriter, r *http.Request, claims *auth.Claims) {
+	id := r.PathValue("id")
+	var body struct {
+		GroupID string `json:"group_id"`
+		Name    string `json:"name"`
+		Host    string `json:"host"`
+		RDPPort int    `json:"rdp_port"`
+		Enabled *bool  `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || id == "" || body.GroupID == "" || body.Host == "" {
+		writeErr(w, http.StatusBadRequest, "group_id and host required")
+		return
+	}
+	if body.RDPPort == 0 {
+		body.RDPPort = 3389
+	}
+	if body.Name == "" {
+		body.Name = body.Host
+	}
+	enabled := 1
+	if body.Enabled != nil && !*body.Enabled {
+		enabled = 0
+	} else if body.Enabled == nil {
+		var cur int
+		_ = s.Store.DB.QueryRowContext(r.Context(), `SELECT enabled FROM resources WHERE id=?`, id).Scan(&cur)
+		enabled = cur
+	}
+	res, err := s.Store.DB.ExecContext(r.Context(), `
+		UPDATE resources SET group_id=?, name=?, host=?, rdp_port=?, enabled=?, updated_at=NOW(3)
+		WHERE id=?`, body.GroupID, body.Name, body.Host, body.RDPPort, enabled, id)
+	if err != nil {
+		mapSvcErr(w, err)
+		return
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	_ = s.Store.InsertAudit(r.Context(), "admin", claims.UserID, "resource_update", "resource", id, "", nil)
+	writeJSON(w, http.StatusOK, map[string]string{"id": id, "status": "updated"})
 }
 
 func (s *Server) handleAdminSoftRelease(w http.ResponseWriter, r *http.Request, claims *auth.Claims) {

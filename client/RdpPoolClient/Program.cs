@@ -103,7 +103,7 @@ var groupsResp = await http.GetFromJsonAsync<GroupsResponse>("api/v1/groups/avai
 var groups = groupsResp?.Groups ?? new List<GroupItem>();
 if (groups.Count == 0)
 {
-    Die("当前账号没有可用的资源组，请联系管理员授权（或先跑 seed）。");
+    Die("当前账号没有可用的资源组，请联系管理员授权。");
     return 2;
 }
 
@@ -136,30 +136,79 @@ else
     RdpPoolClient.ForegroundUtil.AllowThisProcess();
 }
 
+var clientInstanceId = string.IsNullOrEmpty(cfg.ClientInstanceId) ? Guid.NewGuid().ToString("N") : cfg.ClientInstanceId;
 var acquireResp = await http.PostAsJsonAsync("api/v1/sessions/acquire", new
 {
     group_id = groupId,
-    client_instance_id = string.IsNullOrEmpty(cfg.ClientInstanceId) ? Guid.NewGuid().ToString("N") : cfg.ClientInstanceId
+    client_instance_id = clientInstanceId
 });
 var acquireJson = await acquireResp.Content.ReadAsStringAsync();
 Console.WriteLine($"Acquire {(int)acquireResp.StatusCode}");
 
+Ticket? ticket = null;
+SessionInfo? session = null;
+
 if ((int)acquireResp.StatusCode == 202)
 {
-    Console.WriteLine("组内排队中。请轮询 GET api/v1/queue/me，或稍后重试。");
-    Console.WriteLine(RedactSecrets(acquireJson));
-    return 3;
-}
+    var queued = JsonSerializer.Deserialize<AcquireResponse>(acquireJson, jsonOpts);
+    var ahead = queued?.Queue?.Ahead ?? 0;
+    var groupName = groups.FirstOrDefault(g => g.Id == groupId)?.Name ?? groupId;
+    Console.WriteLine($"组内排队 ahead={ahead} group={groupName}");
 
-if (!acquireResp.IsSuccessStatusCode)
+    if (string.Equals(Environment.GetEnvironmentVariable("RDP_POOL_NO_UI"), "1", StringComparison.Ordinal))
+    {
+        var got = await RdpPoolClient.QueueWaitConsole.WaitAsync(http, jsonOpts, clientInstanceId, ahead);
+        if (got?.RdpTicket == null || string.IsNullOrEmpty(got.RdpTicket.Host))
+            return Die("排队结束但未获得资源（可能已取消或超时）。");
+        ticket = new Ticket
+        {
+            TicketId = got.RdpTicket.TicketId,
+            Host = got.RdpTicket.Host,
+            Port = got.RdpTicket.Port,
+            Username = got.RdpTicket.Username,
+            Password = got.RdpTicket.Password
+        };
+        session = got.Session == null ? null : new SessionInfo { Id = got.Session.Id };
+    }
+    else
+    {
+        RdpPoolClient.AcquirePayload? got = null;
+        var waitThread = new Thread(() =>
+        {
+            using var form = new RdpPoolClient.QueueWaitForm(
+                http, jsonOpts, groupId, groupName, clientInstanceId, ahead);
+            if (form.ShowDialog() == DialogResult.OK)
+                got = form.Result;
+        });
+        waitThread.SetApartmentState(ApartmentState.STA);
+        waitThread.Start();
+        waitThread.Join();
+        if (got?.RdpTicket == null || string.IsNullOrEmpty(got.RdpTicket.Host))
+            return Die("已取消排队，未连接远程桌面。");
+        ticket = new Ticket
+        {
+            TicketId = got.RdpTicket.TicketId,
+            Host = got.RdpTicket.Host,
+            Port = got.RdpTicket.Port,
+            Username = got.RdpTicket.Username,
+            Password = got.RdpTicket.Password
+        };
+        session = got.Session == null ? null : new SessionInfo { Id = got.Session.Id };
+        RdpPoolClient.ForegroundUtil.AllowThisProcess();
+    }
+}
+else if (!acquireResp.IsSuccessStatusCode)
 {
     Console.Error.WriteLine(RedactSecrets(acquireJson));
-    return 4;
+    return Die($"分配失败: {(int)acquireResp.StatusCode}");
+}
+else
+{
+    var acquire = JsonSerializer.Deserialize<AcquireResponse>(acquireJson, jsonOpts);
+    ticket = acquire?.RdpTicket;
+    session = acquire?.Session;
 }
 
-var acquire = JsonSerializer.Deserialize<AcquireResponse>(acquireJson, jsonOpts);
-var ticket = acquire?.RdpTicket;
-var session = acquire?.Session;
 if (ticket == null || string.IsNullOrEmpty(ticket.Host))
 {
     Console.Error.WriteLine("分配成功但无票据: " + RedactSecrets(acquireJson));
@@ -591,6 +640,15 @@ sealed class AcquireResponse
     [JsonPropertyName("status")] public string Status { get; set; } = "";
     [JsonPropertyName("session")] public SessionInfo? Session { get; set; }
     [JsonPropertyName("rdp_ticket")] public Ticket? RdpTicket { get; set; }
+    [JsonPropertyName("queue")] public QueueInfo? Queue { get; set; }
+}
+
+sealed class QueueInfo
+{
+    [JsonPropertyName("ahead")] public int Ahead { get; set; }
+    [JsonPropertyName("position")] public int Position { get; set; }
+    [JsonPropertyName("status")] public string Status { get; set; } = "";
+    [JsonPropertyName("group_id")] public string GroupId { get; set; } = "";
 }
 
 sealed class SessionInfo

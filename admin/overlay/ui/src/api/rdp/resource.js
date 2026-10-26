@@ -8,6 +8,10 @@ export function createResource(data) {
   return request({ url: '/api/v1/admin/resources', method: 'post', data })
 }
 
+export function updateResource(id, data) {
+  return request({ url: `/api/v1/admin/resources/${id}`, method: 'put', data })
+}
+
 export function softReleaseResource(id) {
   return request({ url: `/api/v1/admin/resources/${id}/soft-release`, method: 'post' })
 }

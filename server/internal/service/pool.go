@@ -371,27 +371,41 @@ func (s *PoolService) softRelease(ctx context.Context, sess *domain.Session, rea
 	if err != nil {
 		return nil, err
 	}
-	_, err = tx.ExecContext(ctx, `
-		UPDATE resources SET status='idle', current_session_id=NULL, supply_class=?, supply_seq=?,
-		  linger_hint=?, last_soft_release_at=NOW(3), updated_at=NOW(3)
-		WHERE id=?`, supplyClass, supplySeq, boolToInt(linger), sess.ResourceID)
-	if err != nil {
-		return nil, err
-	}
 
 	waitersOffered := false
 	if clean {
-		// try_offer_waiters stub: mark offered if waiter exists (claim path to be filled)
 		var waiterID string
 		err = tx.QueryRowContext(ctx, `
 			SELECT id FROM queue_entries
 			WHERE group_id=? AND status='waiting' ORDER BY seq ASC LIMIT 1 FOR UPDATE SKIP LOCKED`, sess.GroupID).Scan(&waiterID)
 		if err == nil {
-			_, _ = tx.ExecContext(ctx, `
+			// Reserve machine for waiter (not general idle) until claim / offer TTL.
+			_, err = tx.ExecContext(ctx, `
+				UPDATE resources SET status='allocated', current_session_id=NULL, supply_class=NULL, supply_seq=NULL,
+				  linger_hint=0, last_soft_release_at=NOW(3), updated_at=NOW(3)
+				WHERE id=?`, sess.ResourceID)
+			if err != nil {
+				return nil, err
+			}
+			_, err = tx.ExecContext(ctx, `
 				UPDATE queue_entries SET status='offered', offered_resource_id=?, offered_until=DATE_ADD(NOW(3), INTERVAL ? SECOND), updated_at=NOW(3)
 				WHERE id=?`, sess.ResourceID, int(s.Cfg.OfferTTL.Seconds()), waiterID)
+			if err != nil {
+				return nil, err
+			}
 			waitersOffered = true
+			position = "offered"
+			supplyClass = ""
 		} else if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+	}
+	if !waitersOffered {
+		_, err = tx.ExecContext(ctx, `
+			UPDATE resources SET status='idle', current_session_id=NULL, supply_class=?, supply_seq=?,
+			  linger_hint=?, last_soft_release_at=NOW(3), updated_at=NOW(3)
+			WHERE id=?`, supplyClass, supplySeq, boolToInt(linger), sess.ResourceID)
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -457,17 +471,164 @@ func (s *PoolService) QueueMe(ctx context.Context, userID string) (*domain.Queue
 }
 
 func (s *PoolService) CancelQueue(ctx context.Context, userID string) error {
-	res, err := s.Store.DB.ExecContext(ctx, `
-		UPDATE queue_entries SET status='canceled', updated_at=NOW(3)
-		WHERE user_id=? AND status IN ('waiting','offered')`, userID)
+	tx, err := s.Store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	defer func() { _ = tx.Rollback() }()
+
+	var qID, groupID, status string
+	var offeredRes sql.NullString
+	err = tx.QueryRowContext(ctx, `
+		SELECT id, group_id, status, offered_resource_id FROM queue_entries
+		WHERE user_id=? AND status IN ('waiting','offered')
+		ORDER BY created_at DESC LIMIT 1 FOR UPDATE`, userID).Scan(&qID, &groupID, &status, &offeredRes)
+	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
-	return nil
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+		UPDATE queue_entries SET status='canceled', updated_at=NOW(3) WHERE id=?`, qID)
+	if err != nil {
+		return err
+	}
+	// Release reserved offer machine back to idle supply (clean head) so others can take it.
+	if status == domain.QueueOffered && offeredRes.Valid && offeredRes.String != "" {
+		var minSeq sql.NullInt64
+		_ = tx.QueryRowContext(ctx, `
+			SELECT MIN(supply_seq) FROM resources WHERE group_id=? AND status='idle'`, groupID).Scan(&minSeq)
+		seq := int64(0)
+		if minSeq.Valid {
+			seq = minSeq.Int64 - 1
+		}
+		_, _ = tx.ExecContext(ctx, `
+			UPDATE resources SET status='idle', current_session_id=NULL, supply_class='clean', supply_seq=?,
+			  linger_hint=0, updated_at=NOW(3)
+			WHERE id=? AND status='allocated' AND current_session_id IS NULL`, seq, offeredRes.String)
+	}
+	return tx.Commit()
+}
+
+// Claim converts the caller's waiting/offered queue entry into a session + RDP ticket.
+func (s *PoolService) Claim(ctx context.Context, userID, clientInstanceID string) (*AcquireResult, error) {
+	if cur, err := s.Store.GetActiveSessionByUser(ctx, userID); err == nil && cur != nil {
+		ticket, _ := s.issueTicketStub(ctx, cur)
+		return &AcquireResult{Status: "allocated", Session: cur, RDPTicket: ticket, Message: "idempotent existing session"}, nil
+	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+
+	tx, err := s.Store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var q domain.QueueEntry
+	var offeredRes sql.NullString
+	var offeredUntil sql.NullTime
+	err = tx.QueryRowContext(ctx, `
+		SELECT id, group_id, user_id, status, seq, offered_resource_id, offered_until
+		FROM queue_entries WHERE user_id=? AND status IN ('waiting','offered')
+		ORDER BY created_at DESC LIMIT 1 FOR UPDATE`, userID).Scan(
+		&q.ID, &q.GroupID, &q.UserID, &q.Status, &q.Seq, &offeredRes, &offeredUntil)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if offeredRes.Valid {
+		q.OfferedResourceID = &offeredRes.String
+	}
+
+	var resourceID, host string
+	var port int
+	tryResource := func(rid string) error {
+		return tx.QueryRowContext(ctx, `
+			SELECT id, host, rdp_port FROM resources
+			WHERE id=? AND group_id=? AND enabled=1
+			  AND (status='idle' OR (status='allocated' AND current_session_id IS NULL))
+			FOR UPDATE`, rid, q.GroupID).Scan(&resourceID, &host, &port)
+	}
+	pickIdle := func() error {
+		return tx.QueryRowContext(ctx, `
+			SELECT id, host, rdp_port FROM resources
+			WHERE group_id=? AND status='idle' AND enabled=1
+			ORDER BY
+			  CASE supply_class WHEN 'clean' THEN 0 WHEN 'linger' THEN 1 ELSE 2 END,
+			  supply_seq ASC
+			LIMIT 1
+			FOR UPDATE SKIP LOCKED`, q.GroupID).Scan(&resourceID, &host, &port)
+	}
+
+	got := false
+	if q.Status == domain.QueueOffered && q.OfferedResourceID != nil {
+		if err := tryResource(*q.OfferedResourceID); err == nil {
+			got = true
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+	}
+	if !got {
+		if err := pickIdle(); err == nil {
+			got = true
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+	}
+	if !got {
+		// Still waiting — keep queue entry; caller should keep polling.
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		var ahead int
+		_ = s.Store.DB.QueryRowContext(ctx, `
+			SELECT COUNT(1) FROM queue_entries
+			WHERE group_id=? AND status='waiting' AND seq < ?`, q.GroupID, q.Seq).Scan(&ahead)
+		q.Ahead = ahead
+		q.Position = ahead + 1
+		return &AcquireResult{Status: "queued", Queue: &q, Message: "still queued; no idle yet"}, nil
+	}
+
+	sessionID := newID("ses")
+	now := time.Now()
+	lease := now.Add(s.Cfg.LeaseTTL)
+	occ := now.Add(s.Cfg.MaxOccupationTTL)
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO sessions (id, user_id, group_id, resource_id, state, lease_expires_at, occupation_deadline_at, client_instance_id, created_at)
+		VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
+		sessionID, userID, q.GroupID, resourceID, lease, occ, clientInstanceID, now)
+	if err != nil {
+		return nil, err
+	}
+	_, err = tx.ExecContext(ctx, `
+		UPDATE resources SET status='allocated', current_session_id=?, supply_class=NULL, supply_seq=NULL, updated_at=NOW(3)
+		WHERE id=?`, sessionID, resourceID)
+	if err != nil {
+		return nil, err
+	}
+	_, err = tx.ExecContext(ctx, `
+		UPDATE queue_entries SET status='claimed', offered_resource_id=NULL, offered_until=NULL, updated_at=NOW(3)
+		WHERE id=?`, q.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	sess := &domain.Session{
+		ID: sessionID, UserID: userID, GroupID: q.GroupID, ResourceID: resourceID,
+		State: domain.SessionPending, LeaseExpiresAt: &lease, OccupationDeadlineAt: &occ,
+		ClientInstanceID: clientInstanceID, CreatedAt: now,
+	}
+	ticket, _ := s.issueTicket(ctx, sessionID, resourceID, host, port)
+	meta, _ := json.Marshal(map[string]any{"resource_id": resourceID, "queue_id": q.ID})
+	_ = s.Store.InsertAudit(ctx, "pool_user", userID, "queue_claimed", "session", sessionID, "", meta)
+	return &AcquireResult{Status: "allocated", Session: sess, RDPTicket: ticket, Message: "claimed from queue"}, nil
 }
 
 func boolToInt(b bool) int {

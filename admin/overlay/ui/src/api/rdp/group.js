@@ -7,3 +7,7 @@ export function listGroups() {
 export function createGroup(data) {
   return request({ url: '/api/v1/admin/groups', method: 'post', data })
 }
+
+export function updateGroup(id, data) {
+  return request({ url: `/api/v1/admin/groups/${id}`, method: 'put', data })
+}
