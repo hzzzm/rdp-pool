@@ -86,6 +86,11 @@ internal static class RdpAxSession
         var hostHidden = false;
         var ocxFsActive = false;
         var closing = false;
+        var userConfirmedClose = false;
+        // 冒烟自动退出 / 无 UI：不弹确认
+        var skipCloseConfirm =
+            holdConnectedSec > 0 ||
+            string.Equals(Environment.GetEnvironmentVariable("RDP_POOL_NO_UI"), "1", StringComparison.Ordinal);
 
         var form = new Form
         {
@@ -132,9 +137,32 @@ internal static class RdpAxSession
         System.Windows.Forms.Timer? holdTimer = null;
         object? ocxRef = null;
 
-        void CloseHost()
+        bool ConfirmDisconnectUi()
+        {
+            if (skipCloseConfirm || userConfirmedClose) return true;
+            try
+            {
+                // 全屏宿主已藏时不要用 form 作 owner（点不到）；用无 owner 顶层框
+                var useOwner = !hostHidden && !form.IsDisposed && form.Visible && form.Opacity > 0.5;
+                var r = useOwner
+                    ? MessageBox.Show(form, "确定要断开远程桌面并退出吗？", "RDP 资源池客户端",
+                        MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2)
+                    : MessageBox.Show("确定要断开远程桌面并退出吗？", "RDP 资源池客户端",
+                        MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
+                return r == DialogResult.Yes;
+            }
+            catch
+            {
+                return true;
+            }
+        }
+
+        void CloseHost(bool askConfirm = true)
         {
             if (closing || form.IsDisposed) return;
+            if (askConfirm && !ConfirmDisconnectUi())
+                return;
+            userConfirmedClose = true;
             closing = true;
             try
             {
@@ -142,6 +170,34 @@ internal static class RdpAxSession
                     form.BeginInvoke(new Action(() => { try { form.Close(); } catch { /* ignore */ } }));
                 else
                     form.Close();
+            }
+            catch { /* ignore */ }
+        }
+
+        void BringRdpToFront(object? ocx)
+        {
+            try
+            {
+                ForegroundUtil.AllowThisProcess();
+                if (ocxFsActive || hostHidden)
+                {
+                    // OCX 全屏表面：按本进程大窗口 / 标题提示置前
+                    ForegroundUtil.ActivateOcxFullscreenSurface(
+                        Environment.ProcessId, host);
+                    // 稍后再试一次（全屏 HWND 可能略晚创建）
+                    var t = new System.Windows.Forms.Timer { Interval = 250 };
+                    t.Tick += (_, _) =>
+                    {
+                        t.Stop();
+                        t.Dispose();
+                        ForegroundUtil.ActivateOcxFullscreenSurface(Environment.ProcessId, host);
+                    };
+                    t.Start();
+                }
+                else
+                {
+                    ForegroundUtil.Activate(form);
+                }
             }
             catch { /* ignore */ }
         }
@@ -196,9 +252,7 @@ internal static class RdpAxSession
                 }
                 form.ResumeLayout(true);
                 form.Show();
-                form.Activate();
-                form.BringToFront();
-                try { NativeFlash.BringToFront(form.Handle); } catch { /* optional */ }
+                ForegroundUtil.Activate(form);
 
                 localDetail += "; restoredWindowed=1";
             }
@@ -206,7 +260,7 @@ internal static class RdpAxSession
             {
                 localDetail += "; restoreErr=" + ex.Message;
                 // 还原失败则断开，避免永久卡死
-                CloseHost();
+                CloseHost(askConfirm: false);
             }
         }
 
@@ -235,6 +289,7 @@ internal static class RdpAxSession
                 localDetail += "; ocxFullScreenErr=" + ex.Message;
             }
             HideHostAfterOcxFullscreen();
+            BringRdpToFront(ocx);
         }
 
         // DisplayResolution=fullscreen 会话：标题栏最大化 / 双击标题栏 → 真 OCX FullScreen，不是 Form 最大化
@@ -310,6 +365,8 @@ internal static class RdpAxSession
                             localDetail += "; connected=1";
                             if (wantOcxFullscreen)
                                 EnterOcxFullscreen(ocx);
+                            else
+                                BringRdpToFront(ocx);
 
                             if (holdConnectedSec > 0)
                             {
@@ -317,7 +374,7 @@ internal static class RdpAxSession
                                 holdTimer.Tick += (_, _) =>
                                 {
                                     holdTimer.Stop();
-                                    CloseHost();
+                                    CloseHost(askConfirm: false);
                                 };
                                 holdTimer.Start();
                             }
@@ -326,7 +383,8 @@ internal static class RdpAxSession
                         {
                             localDetail += "; disconnected=0";
                             pollTimer.Stop();
-                            CloseHost();
+                            // 连接栏「断开」或对端断开：仍确认（冒烟路径已 skip）
+                            CloseHost(askConfirm: true);
                             return;
                         }
 
@@ -354,17 +412,28 @@ internal static class RdpAxSession
 
                 InvokeCom(ocx, "Connect");
                 localDetail += "; connect_called";
+                ForegroundUtil.Activate(form);
             }
             catch (Exception ex)
             {
                 connectError = ex;
                 localDetail += "; err=" + ex.Message;
-                CloseHost();
+                CloseHost(askConfirm: false);
             }
         };
 
-        form.FormClosing += (_, _) =>
+        form.FormClosing += (_, e) =>
         {
+            if (!userConfirmedClose && !skipCloseConfirm && !closing)
+            {
+                if (!ConfirmDisconnectUi())
+                {
+                    e.Cancel = true;
+                    return;
+                }
+                userConfirmedClose = true;
+            }
+
             closing = true;
             pollTimer?.Stop();
             holdTimer?.Stop();
@@ -538,21 +607,6 @@ internal static class RdpAxSession
     {
         public OcxHost(Guid clsid) : base(clsid.ToString("B")) { }
         public object? GetOcxObject() => GetOcx();
-    }
-}
-
-static class NativeFlash
-{
-    [DllImport("user32.dll")]
-    static extern bool SetForegroundWindow(IntPtr hWnd);
-
-    [DllImport("user32.dll")]
-    static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-
-    public static void BringToFront(IntPtr hwnd)
-    {
-        ShowWindow(hwnd, 9); // SW_RESTORE
-        SetForegroundWindow(hwnd);
     }
 }
 

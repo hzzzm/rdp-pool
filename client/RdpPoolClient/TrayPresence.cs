@@ -73,6 +73,45 @@ static class TrayPresence
                             ToolTipIcon.Info);
                     };
                     menu.Items.Add(aboutItem);
+                    menu.Items.Add(new ToolStripSeparator());
+                    var exitItem = new ToolStripMenuItem("退出…");
+                    exitItem.Click += (_, _) =>
+                    {
+                        // 交给 RDP 窗 FormClosing 弹出确认；无 RDP 窗时再本地确认退出
+                        try
+                        {
+                            Form? target = null;
+                            foreach (Form f in Application.OpenForms)
+                            {
+                                if (f.Text.IndexOf("RDP Pool", StringComparison.OrdinalIgnoreCase) >= 0)
+                                {
+                                    target = f;
+                                    break;
+                                }
+                            }
+                            if (target != null && !target.IsDisposed)
+                            {
+                                if (target.InvokeRequired)
+                                    target.BeginInvoke(new Action(() => { try { target.Close(); } catch { /* ignore */ } }));
+                                else
+                                    target.Close();
+                                return;
+                            }
+                        }
+                        catch { /* fall through */ }
+
+                        if (string.Equals(Environment.GetEnvironmentVariable("RDP_POOL_NO_UI"), "1", StringComparison.Ordinal))
+                            return;
+                        var r = MessageBox.Show(
+                            "确定要断开远程桌面并退出吗？",
+                            "RDP 资源池客户端",
+                            MessageBoxButtons.YesNo,
+                            MessageBoxIcon.Question,
+                            MessageBoxDefaultButton.Button2);
+                        if (r == DialogResult.Yes)
+                            Environment.Exit(0);
+                    };
+                    menu.Items.Add(exitItem);
 
                     _icon = new NotifyIcon
                     {

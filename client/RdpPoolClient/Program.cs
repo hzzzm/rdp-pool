@@ -132,6 +132,8 @@ else
     groupId = picked;
     var name = groups.FirstOrDefault(g => g.Id == groupId)?.Name ?? groupId;
     Console.WriteLine($"已选组: {name}");
+    // 选组对话框关闭后允许随后的 RDP 窗抢前台
+    RdpPoolClient.ForegroundUtil.AllowThisProcess();
 }
 
 var acquireResp = await http.PostAsJsonAsync("api/v1/sessions/acquire", new
@@ -274,8 +276,10 @@ try
             : "尝试 ActiveX 直连（控制面账密，不经 mstsc 凭据框）...");
         var axOk = false;
         var axDetail = "";
+        RdpPoolClient.ForegroundUtil.AllowThisProcess();
         var axThread = new Thread(() =>
         {
+            RdpPoolClient.ForegroundUtil.AllowThisProcess();
             axOk = RdpPoolClient.RdpAxSession.TryConnect(
                 ticket.Host, port, ticket.Username, ticket.Password, holdSec, out axDetail, displayApply);
         });
