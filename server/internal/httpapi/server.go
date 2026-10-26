@@ -53,12 +53,18 @@ func (s *Server) routes() {
 	s.Mux.HandleFunc("POST /api/v1/admin/resources", s.withAdmin(s.handleAdminCreateResource))
 	s.Mux.HandleFunc("POST /api/v1/admin/resources/{id}/soft-release", s.withAdmin(s.handleAdminSoftRelease))
 	s.Mux.HandleFunc("GET /api/v1/admin/pool-users", s.withAdmin(s.handleAdminListUsers))
+	s.Mux.HandleFunc("POST /api/v1/admin/pool-users", s.withAdmin(s.handleAdminCreateUser))
+	s.Mux.HandleFunc("GET /api/v1/admin/pool-users/{id}/groups", s.withAdmin(s.handleAdminGetUserGroups))
 	s.Mux.HandleFunc("PUT /api/v1/admin/pool-users/{id}/groups", s.withAdmin(s.handleAdminGrantGroups))
+	s.Mux.HandleFunc("PUT /api/v1/admin/resources/{id}/credentials", s.withAdmin(s.handleAdminPutCredentials))
 	s.Mux.HandleFunc("GET /api/v1/admin/sessions", s.withAdmin(s.handleAdminListSessions))
 	s.Mux.HandleFunc("GET /api/v1/admin/queues", s.withAdmin(s.handleAdminListQueues))
 	s.Mux.HandleFunc("GET /api/v1/admin/settings", s.withAdmin(s.handleAdminGetSettings))
 	s.Mux.HandleFunc("PUT /api/v1/admin/settings", s.withAdmin(s.handleAdminPutSettings))
 	s.Mux.HandleFunc("GET /api/v1/admin/audit", s.withAdmin(s.handleAdminAudit))
+
+	// RuoYi-Vue3 /prod-api shim (local MVP when Java image cannot be built)
+	s.registerRuoyiShim()
 }
 
 type ctxKey string
@@ -102,7 +108,7 @@ func (s *Server) bearer(r *http.Request, admin bool) (*auth.Claims, error) {
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }

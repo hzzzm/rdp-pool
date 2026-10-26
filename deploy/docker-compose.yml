@@ -1,5 +1,5 @@
-# MVP compose: MySQL 8 (rdp_pool + placeholder ruoyi DB) + Redis + Go API + Nginx
-# RuoYi Java/Vue are documented under admin/ — mount separately when ready.
+# MVP compose: MySQL 8 (ruoyi + rdp_pool) + Redis + Go API + RuoYi-Vue3/UI + RuoYi Java + Nginx
+# Admin UI: http://127.0.0.1:8080/  (admin / admin123)
 
 services:
   mysql:
@@ -20,8 +20,8 @@ services:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD || exit 1"]
       interval: 5s
       timeout: 5s
-      retries: 30
-      start_period: 20s
+      retries: 60
+      start_period: 180s
 
   redis:
     image: redis:7-alpine
@@ -61,6 +61,33 @@ services:
       retries: 20
       start_period: 40s
 
+  # Optional full RuoYi Java (profile: ruoyi-java). Default MVP uses Go /ruoyi/ shim
+  # behind /prod-api (see admin/docker/nginx-ruoyi.conf) because Maven deps often
+  # time out on this network. Build when mirrors work:
+  #   docker compose --profile ruoyi-java build ruoyi-admin
+  ruoyi-admin:
+    profiles: ["ruoyi-java"]
+    build:
+      context: ../admin
+      dockerfile: docker/Dockerfile.admin
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+    container_name: rdp-ruoyi-admin
+    restart: unless-stopped
+    environment:
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_DATABASE: "1"
+      SPRING_DATASOURCE_DRUID_MASTER_URL: "jdbc:mysql://mysql:3306/ruoyi?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=GMT%2B8"
+      SPRING_DATASOURCE_DRUID_MASTER_USERNAME: root
+      SPRING_DATASOURCE_DRUID_MASTER_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_pass_change_me}
+      JAVA_OPTS: "-Xms256m -Xmx512m"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   # One-shot seed: group + demo user + Windows resource (reads DEMO_* from .env)
   seed:
     build:
@@ -86,13 +113,15 @@ services:
       go-api:
         condition: service_healthy
 
+  # Nginx hosts prebuilt RuoYi-Vue3 (scripts/build-admin-ui.ps1 → admin/ui-dist)
+  # + proxies /prod-api → Java, /pool-api → Go
   nginx:
-    image: nginx:1.27-alpine
+    build:
+      context: ../admin
+      dockerfile: docker/Dockerfile.ui
     container_name: rdp-nginx
     ports:
       - "8080:80"
-    volumes:
-      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
       - go-api
 

@@ -1,0 +1,6 @@
+# Serves prebuilt RuoYi-Vue3 dist (see scripts/build-admin-ui.ps1).
+# Avoids pulling node base images on slow networks.
+FROM nginx:1.27-alpine
+COPY ui-dist/ /usr/share/nginx/html/
+COPY docker/nginx-ruoyi.conf /etc/nginx/conf.d/default.conf
+EXPOSE 80

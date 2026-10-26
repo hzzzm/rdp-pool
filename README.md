@@ -28,6 +28,16 @@ curl http://127.0.0.1:8081/healthz
 
 预期：`{"status":"ok"}`。经 Nginx：`http://127.0.0.1:8080/pool-api/healthz`。
 
+### 管理后台（若依）
+
+| 项 | 值 |
+|---|---|
+| URL | **http://127.0.0.1:8080/** |
+| 登录 | `admin` / `admin123` |
+| 菜单 | 「远程桌面资源池」→ 资源组 / Windows 资源 / 终端用户 / 会话与排队 / 池配置 |
+
+首次需 `scripts/fetch-ruoyi.ps1` 拉 vendor；已有 MySQL 卷但缺若依表时跑 `scripts/import-ruoyi-sql.ps1`。详见 [admin/README.md](admin/README.md)。
+
 停止：`docker compose down`（加 `-v` 会清 MySQL 数据）。
 
 ### `.env` 关键字段（勿提交）

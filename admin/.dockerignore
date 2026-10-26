@@ -1,0 +1,8 @@
+vendor/**/.git
+vendor/**/.github
+vendor/**/node_modules
+vendor/**/dist
+vendor/**/target
+**/*.md
+**/.idea
+**/.vscode

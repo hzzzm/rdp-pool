@@ -51,3 +51,10 @@ redis-data/
 # Coverage
 coverage.out
 coverage.html
+
+# Local RuoYi UI build scratch / image payload
+admin/.build-ui/
+admin/ui-dist/
+deploy/build-admin.log
+deploy/.env
+

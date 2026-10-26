@@ -659,7 +659,7 @@ sequenceDiagram
 | CRUD | `/api/v1/admin/resources` | 资源与维护；创建/变更时必填 **group_id** |
 | POST | `/api/v1/admin/resources/{id}/soft-release` | **管理员软释放**（不断 RDP；**idle 入供给队尾**；不立即唤醒等待队首） |
 | CRUD | `/api/v1/admin/pool-users` | 终端用户 |
-| PUT | `/api/v1/admin/pool-users/{id}/groups` | **用户可访问组**授权（覆盖式或增量） |
+| GET/PUT | `/api/v1/admin/pool-users/{id}/groups` | **用户可访问组**查询 / 覆盖式授权（`group_ids`） |
 | GET | `/api/v1/admin/sessions` | 会话列表（可按 group 过滤） |
 | GET | `/api/v1/admin/queues` | **按组**排队视图 |
 | GET/PUT | `/api/v1/admin/settings` | 含 `max_occupation_ttl_sec` |
