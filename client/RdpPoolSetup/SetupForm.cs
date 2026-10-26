@@ -8,7 +8,11 @@ sealed class SetupForm : Form
     readonly TextBox _login = new() { Width = 360 };
     readonly TextBox _password = new() { Width = 360, UseSystemPasswordChar = true };
     readonly ComboBox _display = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 360 };
-    readonly CheckBox _skipMstsc = new() { Text = "仅验证 API（不启动远程桌面）", AutoSize = true };
+    readonly CheckBox _skipMstsc = new()
+    {
+        Text = "【调试】不启动远程桌面（SkipMstsc — 勾选后客户端选组会立刻退出）",
+        AutoSize = true
+    };
     readonly CheckBox _autoRelease = new() { Text = "退出时自动释放会话", AutoSize = true, Checked = true };
     readonly Label _status = new() { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(420, 0) };
     readonly Button _btnSave = new() { Text = "保存", Width = 90, Height = 28 };
@@ -26,7 +30,7 @@ sealed class SetupForm : Form
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(460, 400);
+        ClientSize = new Size(520, 420);
         Font = new Font("Microsoft YaHei UI", 9F);
         try
         {
@@ -239,6 +243,20 @@ sealed class SetupForm : Form
             MessageBox.Show(this, "请填写密码。", "提示",
                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
+        }
+
+        if (_skipMstsc.Checked)
+        {
+            var confirm = MessageBox.Show(this,
+                "已勾选「不启动远程桌面」(SkipMstsc)。\n\n" +
+                "保存后运行客户端：登录并选组会成功，但不会打开 RDP，进程会马上退出（常被误认为闪退）。\n\n" +
+                "确定要保存该调试选项吗？\n（正常使用请点「否」并取消勾选。）",
+                "确认 SkipMstsc",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2);
+            if (confirm != DialogResult.Yes)
+                return;
         }
 
         // 记录保存前文件快照，失败时确保未写入

@@ -63,6 +63,11 @@ var jsonOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
 using var http = new HttpClient { BaseAddress = new Uri(cfg.ApiBaseUrl.TrimEnd('/') + "/") };
 
 Console.WriteLine($"API: {cfg.ApiBaseUrl}");
+Console.WriteLine($"SkipMstsc={cfg.SkipMstsc} AutoRelease={cfg.AutoRelease} DisplayResolution={LocalDisplay.Normalize(cfg.DisplayResolution)}");
+if (cfg.SkipMstsc)
+{
+    Console.WriteLine("警告: SkipMstsc=true — 选组分配成功后不会启动远程桌面（进程会直接退出，看起来像闪退）。");
+}
 Console.WriteLine("登录中...");
 var loginResp = await http.PostAsJsonAsync("api/v1/auth/login", new { login = cfg.Login, password = cfg.Password });
 if (!loginResp.IsSuccessStatusCode)
@@ -202,6 +207,20 @@ try
     if (cfg.SkipMstsc)
     {
         Console.WriteLine("SkipMstsc=true，不启动远程桌面（仅验证 API）。");
+        if (!string.Equals(Environment.GetEnvironmentVariable("RDP_POOL_NO_UI"), "1", StringComparison.Ordinal))
+        {
+            try
+            {
+                MessageBox.Show(
+                    "已成功分配资源，但配置项 SkipMstsc=true（Setup 中「不启动远程桌面」）。\n\n" +
+                    "因此不会打开 RDP 窗口，客户端即将退出——这不是崩溃。\n\n" +
+                    "若要正常连远程桌面：打开 RdpPoolSetup.exe，取消勾选该选项后点「保存」。",
+                    "RDP 资源池客户端",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+            catch { /* ignore */ }
+        }
     }
     else if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
     {
