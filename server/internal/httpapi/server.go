@@ -61,6 +61,7 @@ func (s *Server) routes() {
 	s.Mux.HandleFunc("PUT /api/v1/admin/resources/{id}/credentials", s.withAdmin(s.handleAdminPutCredentials))
 	s.Mux.HandleFunc("GET /api/v1/admin/sessions", s.withAdmin(s.handleAdminListSessions))
 	s.Mux.HandleFunc("GET /api/v1/admin/queues", s.withAdmin(s.handleAdminListQueues))
+	s.Mux.HandleFunc("GET /api/v1/admin/queues/stats", s.withAdmin(s.handleAdminQueueStats))
 	s.Mux.HandleFunc("GET /api/v1/admin/settings", s.withAdmin(s.handleAdminGetSettings))
 	s.Mux.HandleFunc("PUT /api/v1/admin/settings", s.withAdmin(s.handleAdminPutSettings))
 	s.Mux.HandleFunc("GET /api/v1/admin/audit", s.withAdmin(s.handleAdminAudit))

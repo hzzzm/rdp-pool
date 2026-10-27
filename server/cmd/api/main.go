@@ -29,6 +29,10 @@ func main() {
 	pool := service.NewPoolService(st, tokens, cfg)
 	api := httpapi.New(pool, tokens, st)
 
+	reaperCtx, reaperCancel := context.WithCancel(context.Background())
+	defer reaperCancel()
+	pool.StartReaper(reaperCtx)
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           api.Handler(),
@@ -36,7 +40,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("rdp-pool go-api listening on %s", cfg.HTTPAddr)
+		log.Printf("rdp-pool go-api listening on %s (queue heartbeat ttl=%s)", cfg.HTTPAddr, cfg.QueueHeartbeatTTL)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("listen: %v", err)
 		}
@@ -46,6 +50,7 @@ func main() {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 
+	reaperCancel()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(ctx)

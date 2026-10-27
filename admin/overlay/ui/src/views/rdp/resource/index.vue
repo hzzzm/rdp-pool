@@ -22,7 +22,12 @@
       <el-table-column label="Host" prop="Host" />
       <el-table-column label="端口" prop="RDPPort" width="80" />
       <el-table-column label="状态" prop="Status" width="100" />
-      <el-table-column label="Linger" width="90">
+      <el-table-column width="120">
+        <template #header>
+          <el-tooltip content="软释放入队尾（linger）：管理员/TTL/失联软释放后，资源进入组内空闲供给队尾，不优先分给排队队首" placement="top">
+            <span>Linger</span>
+          </el-tooltip>
+        </template>
         <template #default="scope">
           <el-tag v-if="scope.row.LingerHint" type="warning">可能仍有旧 RDP</el-tag>
           <span v-else>—</span>

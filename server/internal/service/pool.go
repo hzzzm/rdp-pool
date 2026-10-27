@@ -140,20 +140,22 @@ func (s *PoolService) Acquire(ctx context.Context, userID, groupID, clientInstan
 			seq = maxSeq.Int64 + 1
 		}
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO queue_entries (id, group_id, user_id, status, seq, created_at, updated_at)
-			VALUES (?, ?, ?, 'waiting', ?, NOW(3), NOW(3))`, qeID, groupID, userID, seq)
+			INSERT INTO queue_entries (id, group_id, user_id, status, seq, created_at, updated_at, heartbeat_at)
+			VALUES (?, ?, ?, 'waiting', ?, NOW(3), NOW(3), NOW(3))`, qeID, groupID, userID, seq)
 		if err != nil {
 			return nil, err
 		}
 		if err := tx.Commit(); err != nil {
 			return nil, err
 		}
+		meta, _ := json.Marshal(map[string]any{"group_id": groupID, "seq": seq})
+		_ = s.Store.InsertAudit(ctx, "pool_user", userID, "queue_start", "queue_entry", qeID, "", meta)
 		ahead := int(seq - 1)
 		return &AcquireResult{
 			Status: "queued",
 			Queue: &domain.QueueEntry{
 				ID: qeID, GroupID: groupID, UserID: userID, Status: domain.QueueWaiting,
-				Seq: seq, Position: int(seq), Ahead: ahead,
+				Seq: seq, Position: int(seq), Ahead: ahead, CreatedAt: time.Now(),
 			},
 			Message: fmt.Sprintf("queued in group; ahead=%d", ahead),
 		}, nil
@@ -443,13 +445,13 @@ func (s *PoolService) softRelease(ctx context.Context, sess *domain.Session, rea
 
 func (s *PoolService) QueueMe(ctx context.Context, userID string) (*domain.QueueEntry, error) {
 	row := s.Store.DB.QueryRowContext(ctx, `
-		SELECT id, group_id, user_id, status, seq, offered_resource_id, offered_until
+		SELECT id, group_id, user_id, status, seq, offered_resource_id, offered_until, created_at
 		FROM queue_entries WHERE user_id=? AND status IN ('waiting','offered')
 		ORDER BY created_at DESC LIMIT 1`, userID)
 	var q domain.QueueEntry
 	var offeredRes sql.NullString
 	var offeredUntil sql.NullTime
-	if err := row.Scan(&q.ID, &q.GroupID, &q.UserID, &q.Status, &q.Seq, &offeredRes, &offeredUntil); err != nil {
+	if err := row.Scan(&q.ID, &q.GroupID, &q.UserID, &q.Status, &q.Seq, &offeredRes, &offeredUntil, &q.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -461,6 +463,12 @@ func (s *PoolService) QueueMe(ctx context.Context, userID string) (*domain.Queue
 	if offeredUntil.Valid {
 		q.OfferedUntil = &offeredUntil.Time
 	}
+	now := time.Now()
+	_, _ = s.Store.DB.ExecContext(ctx, `
+		UPDATE queue_entries SET heartbeat_at=?, updated_at=? WHERE id=? AND status IN ('waiting','offered')`,
+		now, now, q.ID)
+	q.HeartbeatAt = &now
+	q.WaitSec = int(now.Sub(q.CreatedAt).Seconds())
 	var ahead int
 	_ = s.Store.DB.QueryRowContext(ctx, `
 		SELECT COUNT(1) FROM queue_entries
@@ -471,6 +479,11 @@ func (s *PoolService) QueueMe(ctx context.Context, userID string) (*domain.Queue
 }
 
 func (s *PoolService) CancelQueue(ctx context.Context, userID string) error {
+	return s.finishQueue(ctx, userID, "", domain.QueueCanceled, domain.QueueOutcomeCanceled, "pool_user", userID)
+}
+
+// finishQueue ends the caller's active queue entry (or a specific id) and writes history.
+func (s *PoolService) finishQueue(ctx context.Context, userID, queueID, newStatus, outcome, actorType, actorID string) error {
 	tx, err := s.Store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -479,18 +492,40 @@ func (s *PoolService) CancelQueue(ctx context.Context, userID string) error {
 
 	var qID, groupID, status string
 	var offeredRes sql.NullString
-	err = tx.QueryRowContext(ctx, `
-		SELECT id, group_id, status, offered_resource_id FROM queue_entries
-		WHERE user_id=? AND status IN ('waiting','offered')
-		ORDER BY created_at DESC LIMIT 1 FOR UPDATE`, userID).Scan(&qID, &groupID, &status, &offeredRes)
+	var createdAt time.Time
+	if queueID != "" {
+		err = tx.QueryRowContext(ctx, `
+			SELECT id, group_id, user_id, status, offered_resource_id, created_at FROM queue_entries
+			WHERE id=? AND status IN ('waiting','offered') FOR UPDATE`, queueID).Scan(
+			&qID, &groupID, &userID, &status, &offeredRes, &createdAt)
+	} else {
+		err = tx.QueryRowContext(ctx, `
+			SELECT id, group_id, status, offered_resource_id, created_at FROM queue_entries
+			WHERE user_id=? AND status IN ('waiting','offered')
+			ORDER BY created_at DESC LIMIT 1 FOR UPDATE`, userID).Scan(&qID, &groupID, &status, &offeredRes, &createdAt)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
 	if err != nil {
 		return err
 	}
+	now := time.Now()
+	waitSec := int(now.Sub(createdAt).Seconds())
+	if waitSec < 0 {
+		waitSec = 0
+	}
 	_, err = tx.ExecContext(ctx, `
-		UPDATE queue_entries SET status='canceled', updated_at=NOW(3) WHERE id=?`, qID)
+		UPDATE queue_entries SET status=?, updated_at=?, ended_at=?, offered_resource_id=NULL, offered_until=NULL
+		WHERE id=?`, newStatus, now, now, qID)
+	if err != nil {
+		return err
+	}
+	histID := newID("qH")
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO queue_history (id, queue_entry_id, group_id, user_id, started_at, ended_at, wait_sec, outcome)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		histID, qID, groupID, userID, createdAt, now, waitSec, outcome)
 	if err != nil {
 		return err
 	}
@@ -508,7 +543,14 @@ func (s *PoolService) CancelQueue(ctx context.Context, userID string) error {
 			  linger_hint=0, updated_at=NOW(3)
 			WHERE id=? AND status='allocated' AND current_session_id IS NULL`, seq, offeredRes.String)
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	meta, _ := json.Marshal(map[string]any{
+		"group_id": groupID, "outcome": outcome, "wait_sec": waitSec,
+	})
+	_ = s.Store.InsertAudit(ctx, actorType, actorID, "queue_end", "queue_entry", qID, "", meta)
+	return nil
 }
 
 // Claim converts the caller's waiting/offered queue entry into a session + RDP ticket.
@@ -530,10 +572,10 @@ func (s *PoolService) Claim(ctx context.Context, userID, clientInstanceID string
 	var offeredRes sql.NullString
 	var offeredUntil sql.NullTime
 	err = tx.QueryRowContext(ctx, `
-		SELECT id, group_id, user_id, status, seq, offered_resource_id, offered_until
+		SELECT id, group_id, user_id, status, seq, offered_resource_id, offered_until, created_at
 		FROM queue_entries WHERE user_id=? AND status IN ('waiting','offered')
 		ORDER BY created_at DESC LIMIT 1 FOR UPDATE`, userID).Scan(
-		&q.ID, &q.GroupID, &q.UserID, &q.Status, &q.Seq, &offeredRes, &offeredUntil)
+		&q.ID, &q.GroupID, &q.UserID, &q.Status, &q.Seq, &offeredRes, &offeredUntil, &q.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -543,6 +585,9 @@ func (s *PoolService) Claim(ctx context.Context, userID, clientInstanceID string
 	if offeredRes.Valid {
 		q.OfferedResourceID = &offeredRes.String
 	}
+	// Refresh queue heartbeat while still waiting / claiming.
+	_, _ = tx.ExecContext(ctx, `
+		UPDATE queue_entries SET heartbeat_at=NOW(3), updated_at=NOW(3) WHERE id=?`, q.ID)
 
 	var resourceID, host string
 	var port int
@@ -610,9 +655,21 @@ func (s *PoolService) Claim(ctx context.Context, userID, clientInstanceID string
 	if err != nil {
 		return nil, err
 	}
+	waitSec := int(now.Sub(q.CreatedAt).Seconds())
+	if waitSec < 0 {
+		waitSec = 0
+	}
 	_, err = tx.ExecContext(ctx, `
-		UPDATE queue_entries SET status='claimed', offered_resource_id=NULL, offered_until=NULL, updated_at=NOW(3)
-		WHERE id=?`, q.ID)
+		UPDATE queue_entries SET status='claimed', offered_resource_id=NULL, offered_until=NULL,
+		  updated_at=?, ended_at=? WHERE id=?`, now, now, q.ID)
+	if err != nil {
+		return nil, err
+	}
+	histID := newID("qH")
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO queue_history (id, queue_entry_id, group_id, user_id, started_at, ended_at, wait_sec, outcome)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		histID, q.ID, q.GroupID, userID, q.CreatedAt, now, waitSec, domain.QueueOutcomeClaimed)
 	if err != nil {
 		return nil, err
 	}
@@ -626,9 +683,80 @@ func (s *PoolService) Claim(ctx context.Context, userID, clientInstanceID string
 		ClientInstanceID: clientInstanceID, CreatedAt: now,
 	}
 	ticket, _ := s.issueTicket(ctx, sessionID, resourceID, host, port)
-	meta, _ := json.Marshal(map[string]any{"resource_id": resourceID, "queue_id": q.ID})
+	meta, _ := json.Marshal(map[string]any{"resource_id": resourceID, "queue_id": q.ID, "wait_sec": waitSec})
 	_ = s.Store.InsertAudit(ctx, "pool_user", userID, "queue_claimed", "session", sessionID, "", meta)
 	return &AcquireResult{Status: "allocated", Session: sess, RDPTicket: ticket, Message: "claimed from queue"}, nil
+}
+
+// ListActiveQueues returns waiting/offered entries with group name and wait duration.
+func (s *PoolService) ListActiveQueues(ctx context.Context) ([]domain.QueueEntry, error) {
+	rows, err := s.Store.DB.QueryContext(ctx, `
+		SELECT q.id, q.group_id, COALESCE(g.name,''), q.user_id, COALESCE(u.login,''),
+		       q.status, q.seq, q.created_at, q.heartbeat_at
+		FROM queue_entries q
+		LEFT JOIN resource_groups g ON g.id = q.group_id
+		LEFT JOIN pool_users u ON u.id = q.user_id
+		WHERE q.status IN ('waiting','offered')
+		ORDER BY q.group_id, q.seq`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	now := time.Now()
+	var list []domain.QueueEntry
+	for rows.Next() {
+		var q domain.QueueEntry
+		var hb sql.NullTime
+		if err := rows.Scan(&q.ID, &q.GroupID, &q.GroupName, &q.UserID, &q.UserLogin,
+			&q.Status, &q.Seq, &q.CreatedAt, &hb); err != nil {
+			return nil, err
+		}
+		if hb.Valid {
+			t := hb.Time
+			q.HeartbeatAt = &t
+		}
+		q.WaitSec = int(now.Sub(q.CreatedAt).Seconds())
+		if q.WaitSec < 0 {
+			q.WaitSec = 0
+		}
+		list = append(list, q)
+	}
+	if list == nil {
+		list = []domain.QueueEntry{}
+	}
+	return list, nil
+}
+
+// QueueStatsByGroup returns 7d/30d queue counts and average wait from queue_history.
+func (s *PoolService) QueueStatsByGroup(ctx context.Context) ([]domain.QueueGroupStats, error) {
+	rows, err := s.Store.DB.QueryContext(ctx, `
+		SELECT g.id, g.name, g.code,
+		  COALESCE(SUM(CASE WHEN h.ended_at >= DATE_SUB(NOW(3), INTERVAL 30 DAY) THEN 1 ELSE 0 END), 0) AS month_count,
+		  COALESCE(AVG(CASE WHEN h.ended_at >= DATE_SUB(NOW(3), INTERVAL 30 DAY) THEN h.wait_sec END), 0) AS month_avg,
+		  COALESCE(SUM(CASE WHEN h.ended_at >= DATE_SUB(NOW(3), INTERVAL 7 DAY) THEN 1 ELSE 0 END), 0) AS week_count,
+		  COALESCE(AVG(CASE WHEN h.ended_at >= DATE_SUB(NOW(3), INTERVAL 7 DAY) THEN h.wait_sec END), 0) AS week_avg
+		FROM resource_groups g
+		LEFT JOIN queue_history h ON h.group_id = g.id
+		  AND h.ended_at >= DATE_SUB(NOW(3), INTERVAL 30 DAY)
+		GROUP BY g.id, g.name, g.code
+		ORDER BY g.sort_order ASC, g.name ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []domain.QueueGroupStats
+	for rows.Next() {
+		var st domain.QueueGroupStats
+		if err := rows.Scan(&st.GroupID, &st.GroupName, &st.GroupCode,
+			&st.MonthCount, &st.MonthAvgWaitSec, &st.WeekCount, &st.WeekAvgWaitSec); err != nil {
+			return nil, err
+		}
+		list = append(list, st)
+	}
+	if list == nil {
+		list = []domain.QueueGroupStats{}
+	}
+	return list, nil
 }
 
 func boolToInt(b bool) int {

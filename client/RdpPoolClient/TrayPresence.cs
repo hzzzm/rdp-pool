@@ -77,13 +77,16 @@ static class TrayPresence
                     var exitItem = new ToolStripMenuItem("退出…");
                     exitItem.Click += (_, _) =>
                     {
-                        // 交给 RDP 窗 FormClosing 弹出确认；无 RDP 窗时再本地确认退出
+                        // Prefer closing queue / RDP forms so FormClosing can leave-queue / confirm.
                         try
                         {
                             Form? target = null;
                             foreach (Form f in Application.OpenForms)
                             {
-                                if (f.Text.IndexOf("RDP Pool", StringComparison.OrdinalIgnoreCase) >= 0)
+                                var t = f.Text ?? "";
+                                if (t.IndexOf("排队", StringComparison.OrdinalIgnoreCase) >= 0
+                                    || t.IndexOf("RDP Pool", StringComparison.OrdinalIgnoreCase) >= 0
+                                    || t.IndexOf("远程桌面", StringComparison.OrdinalIgnoreCase) >= 0)
                                 {
                                     target = f;
                                     break;
@@ -103,13 +106,18 @@ static class TrayPresence
                         if (string.Equals(Environment.GetEnvironmentVariable("RDP_POOL_NO_UI"), "1", StringComparison.Ordinal))
                             return;
                         var r = MessageBox.Show(
-                            "确定要断开远程桌面并退出吗？",
+                            QueueLeave.IsQueued
+                                ? "确定要取消排队并退出吗？"
+                                : "确定要断开远程桌面并退出吗？",
                             "RDP 资源池客户端",
                             MessageBoxButtons.YesNo,
                             MessageBoxIcon.Question,
                             MessageBoxDefaultButton.Button2);
                         if (r == DialogResult.Yes)
+                        {
+                            QueueLeave.TryLeaveSync("tray-exit");
                             Environment.Exit(0);
+                        }
                     };
                     menu.Items.Add(exitItem);
 

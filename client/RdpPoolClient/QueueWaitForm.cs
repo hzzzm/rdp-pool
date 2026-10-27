@@ -188,12 +188,14 @@ sealed class QueueWaitForm : Form
         FormClosing += (_, e) =>
         {
             if (DialogResult == DialogResult.OK || _canceled) return;
+            // X / Alt+F4 / tray Close: leave queue synchronously so admin list clears immediately.
             e.Cancel = true;
-            _ = CancelAsync();
+            CancelSync("form-closing");
         };
 
         Shown += async (_, _) =>
         {
+            QueueLeave.MarkQueued(true);
             _poll.Start();
             _pulse.Start();
             await PollAsync();
@@ -223,6 +225,7 @@ sealed class QueueWaitForm : Form
                     Result = acquired;
                     _poll.Stop();
                     _pulse.Stop();
+                    QueueLeave.MarkQueued(false);
                     DialogResult = DialogResult.OK;
                     Close();
                     return;
@@ -266,6 +269,7 @@ sealed class QueueWaitForm : Form
                                 };
                                 _poll.Stop();
                                 _pulse.Stop();
+                                QueueLeave.MarkQueued(false);
                                 DialogResult = DialogResult.OK;
                                 Close();
                                 return;
@@ -273,6 +277,7 @@ sealed class QueueWaitForm : Form
                         }
                     }
                 }
+                QueueLeave.MarkQueued(false);
                 _statusLabel.Text = "排队已结束，请重试连接";
                 return;
             }
@@ -302,11 +307,30 @@ sealed class QueueWaitForm : Form
         _poll.Stop();
         _pulse.Stop();
         _statusLabel.Text = "正在取消排队…";
+        await QueueLeave.TryLeaveAsync(_http);
+        QueueLeave.MarkQueued(false);
+        DialogResult = DialogResult.Cancel;
+        Close();
+    }
+
+    void CancelSync(string reason)
+    {
+        if (_canceled) return;
+        _canceled = true;
+        _poll.Stop();
+        _pulse.Stop();
+        _statusLabel.Text = "正在取消排队…";
         try
         {
-            await _http.DeleteAsync("api/v1/queue/me");
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            var task = _http.DeleteAsync("api/v1/queue/me", cts.Token);
+            task.Wait(cts.Token);
+            _ = task.Result;
         }
         catch { /* ignore */ }
+        QueueLeave.MarkQueued(false);
+        if (!string.IsNullOrEmpty(reason))
+            Console.WriteLine("leave-queue: " + reason);
         DialogResult = DialogResult.Cancel;
         Close();
     }
@@ -332,7 +356,10 @@ static class QueueWaitConsole
         int initialAhead,
         CancellationToken ct = default)
     {
-        Console.WriteLine($"组内排队中 ahead={initialAhead}；轮询 queue/me / claim（Ctrl+C 取消需进程级）。");
+        Console.WriteLine($"组内排队中 ahead={initialAhead}；轮询 queue/me / claim（取消时 leave-queue）。");
+        QueueLeave.MarkQueued(true);
+        try
+        {
         while (!ct.IsCancellationRequested)
         {
             using var claimResp = await http.PostAsJsonAsync("api/v1/sessions/claim", new
@@ -344,12 +371,18 @@ static class QueueWaitConsole
             {
                 var acquired = JsonSerializer.Deserialize<AcquirePayload>(claimJson, json);
                 if (acquired?.RdpTicket != null && !string.IsNullOrEmpty(acquired.RdpTicket.Host))
+                {
+                    QueueLeave.MarkQueued(false);
                     return acquired;
+                }
             }
 
             using var meResp = await http.GetAsync("api/v1/queue/me", ct);
             if ((int)meResp.StatusCode == 404)
+            {
+                QueueLeave.MarkQueued(false);
                 return null;
+            }
             if (meResp.IsSuccessStatusCode)
             {
                 var q = await meResp.Content.ReadFromJsonAsync<QueueMePayload>(json, ct);
@@ -357,6 +390,13 @@ static class QueueWaitConsole
                     Console.WriteLine($"  queue status={q.Status} position={q.Position} ahead={q.Ahead}");
             }
             await Task.Delay(2000, ct);
+        }
+        }
+        finally
+        {
+            if (QueueLeave.IsQueued)
+                await QueueLeave.TryLeaveAsync(http);
+            QueueLeave.MarkQueued(false);
         }
         return null;
     }

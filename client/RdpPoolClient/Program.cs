@@ -78,6 +78,14 @@ var login = await loginResp.Content.ReadFromJsonAsync<LoginResponse>(jsonOpts);
 http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", login!.AccessToken);
 Console.WriteLine("登录成功");
 
+RdpPoolClient.QueueLeave.Bind(http);
+AppDomain.CurrentDomain.ProcessExit += (_, _) => RdpPoolClient.QueueLeave.TryLeaveSync("process-exit");
+Console.CancelKeyPress += (_, e) =>
+{
+    RdpPoolClient.QueueLeave.TryLeaveSync("ctrl-c");
+    e.Cancel = false;
+};
+
 using var tray = RdpPoolClient.TrayPresence.Start("RDP 资源池客户端", cfgPath);
 
 var localW = 1920;
@@ -154,12 +162,17 @@ if ((int)acquireResp.StatusCode == 202)
     var ahead = queued?.Queue?.Ahead ?? 0;
     var groupName = groups.FirstOrDefault(g => g.Id == groupId)?.Name ?? groupId;
     Console.WriteLine($"组内排队 ahead={ahead} group={groupName}");
+    RdpPoolClient.QueueLeave.MarkQueued(true);
 
     if (string.Equals(Environment.GetEnvironmentVariable("RDP_POOL_NO_UI"), "1", StringComparison.Ordinal))
     {
         var got = await RdpPoolClient.QueueWaitConsole.WaitAsync(http, jsonOpts, clientInstanceId, ahead);
         if (got?.RdpTicket == null || string.IsNullOrEmpty(got.RdpTicket.Host))
+        {
+            RdpPoolClient.QueueLeave.TryLeaveSync("console-queue-end");
             return Die("排队结束但未获得资源（可能已取消或超时）。");
+        }
+        RdpPoolClient.QueueLeave.MarkQueued(false);
         ticket = new Ticket
         {
             TicketId = got.RdpTicket.TicketId,
@@ -184,7 +197,11 @@ if ((int)acquireResp.StatusCode == 202)
         waitThread.Start();
         waitThread.Join();
         if (got?.RdpTicket == null || string.IsNullOrEmpty(got.RdpTicket.Host))
+        {
+            RdpPoolClient.QueueLeave.TryLeaveSync("queue-dialog-cancel");
             return Die("已取消排队，未连接远程桌面。");
+        }
+        RdpPoolClient.QueueLeave.MarkQueued(false);
         ticket = new Ticket
         {
             TicketId = got.RdpTicket.TicketId,

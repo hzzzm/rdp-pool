@@ -605,31 +605,51 @@ func (s *Server) handleAdminListSessions(w http.ResponseWriter, r *http.Request,
 }
 
 func (s *Server) handleAdminListQueues(w http.ResponseWriter, r *http.Request, _ *auth.Claims) {
-	rows, err := s.Store.DB.QueryContext(r.Context(), `
-		SELECT id, group_id, user_id, status, seq FROM queue_entries
-		WHERE status IN ('waiting','offered') ORDER BY group_id, seq`)
+	list, err := s.Pool.ListActiveQueues(r.Context())
 	if err != nil {
 		mapSvcErr(w, err)
 		return
 	}
-	defer rows.Close()
 	type qe struct {
-		ID, GroupID, UserID, Status string
-		Seq                         int64
+		ID, GroupID, GroupName, UserID, UserLogin, Status string
+		Seq                                               int64
+		CreatedAt                                         time.Time
+		WaitSec                                           int
+		HeartbeatAt                                       *time.Time
 	}
-	var list []qe
-	for rows.Next() {
-		var item qe
-		if err := rows.Scan(&item.ID, &item.GroupID, &item.UserID, &item.Status, &item.Seq); err != nil {
-			mapSvcErr(w, err)
-			return
-		}
-		list = append(list, item)
+	out := make([]qe, 0, len(list))
+	for _, q := range list {
+		out = append(out, qe{
+			ID: q.ID, GroupID: q.GroupID, GroupName: q.GroupName,
+			UserID: q.UserID, UserLogin: q.UserLogin, Status: q.Status,
+			Seq: q.Seq, CreatedAt: q.CreatedAt, WaitSec: q.WaitSec, HeartbeatAt: q.HeartbeatAt,
+		})
 	}
-	if list == nil {
-		list = []qe{}
+	writeJSON(w, http.StatusOK, map[string]any{"queues": out})
+}
+
+func (s *Server) handleAdminQueueStats(w http.ResponseWriter, r *http.Request, _ *auth.Claims) {
+	list, err := s.Pool.QueueStatsByGroup(r.Context())
+	if err != nil {
+		mapSvcErr(w, err)
+		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"queues": list})
+	type st struct {
+		GroupID, GroupName, GroupCode string
+		MonthCount                    int64
+		MonthAvgWaitSec               float64
+		WeekCount                     int64
+		WeekAvgWaitSec                float64
+	}
+	out := make([]st, 0, len(list))
+	for _, x := range list {
+		out = append(out, st{
+			GroupID: x.GroupID, GroupName: x.GroupName, GroupCode: x.GroupCode,
+			MonthCount: x.MonthCount, MonthAvgWaitSec: x.MonthAvgWaitSec,
+			WeekCount: x.WeekCount, WeekAvgWaitSec: x.WeekAvgWaitSec,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"stats": out})
 }
 
 func (s *Server) handleAdminGetSettings(w http.ResponseWriter, r *http.Request, _ *auth.Claims) {

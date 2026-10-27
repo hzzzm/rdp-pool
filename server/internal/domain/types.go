@@ -38,10 +38,18 @@ const (
 
 // Queue entry status (§3.5)
 const (
-	QueueWaiting  = "waiting"
-	QueueOffered  = "offered"
-	QueueClaimed  = "claimed"
-	QueueCanceled = "canceled"
+	QueueWaiting   = "waiting"
+	QueueOffered   = "offered"
+	QueueClaimed   = "claimed"
+	QueueCanceled  = "canceled"
+	QueueTimedOut  = "timed_out"
+)
+
+// Queue end outcomes (persisted in queue_history)
+const (
+	QueueOutcomeCanceled = "canceled"
+	QueueOutcomeClaimed  = "claimed"
+	QueueOutcomeTimedOut = "timed_out"
 )
 
 type ResourceGroup struct {
@@ -103,13 +111,28 @@ type Session struct {
 type QueueEntry struct {
 	ID                 string     `json:"id"`
 	GroupID            string     `json:"group_id"`
+	GroupName          string     `json:"group_name,omitempty"`
 	UserID             string     `json:"user_id"`
+	UserLogin          string     `json:"user_login,omitempty"`
 	Status             string     `json:"status"`
 	Seq                int64      `json:"seq"`
 	Position           int        `json:"position,omitempty"`
 	Ahead              int        `json:"ahead,omitempty"`
 	OfferedResourceID  *string    `json:"offered_resource_id,omitempty"`
 	OfferedUntil       *time.Time `json:"offered_until,omitempty"`
+	CreatedAt          time.Time  `json:"created_at,omitempty"`
+	HeartbeatAt        *time.Time `json:"heartbeat_at,omitempty"`
+	WaitSec            int        `json:"wait_sec,omitempty"`
+}
+
+type QueueGroupStats struct {
+	GroupID           string  `json:"group_id"`
+	GroupName         string  `json:"group_name"`
+	GroupCode         string  `json:"group_code,omitempty"`
+	MonthCount        int64   `json:"month_count"`
+	MonthAvgWaitSec   float64 `json:"month_avg_wait_sec"`
+	WeekCount         int64   `json:"week_count"`
+	WeekAvgWaitSec    float64 `json:"week_avg_wait_sec"`
 }
 
 type RDPTicket struct {

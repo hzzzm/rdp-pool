@@ -103,8 +103,25 @@ CREATE TABLE IF NOT EXISTS queue_entries (
   offered_until        DATETIME(3) NULL,
   created_at           DATETIME(3) NOT NULL,
   updated_at           DATETIME(3) NOT NULL,
+  heartbeat_at         DATETIME(3) NULL,
+  ended_at             DATETIME(3) NULL,
   KEY idx_queue_group_status_seq (group_id, status, seq),
-  KEY idx_queue_user_status (user_id, status)
+  KEY idx_queue_user_status (user_id, status),
+  KEY idx_queue_heartbeat (status, heartbeat_at),
+  KEY idx_queue_ended (group_id, ended_at, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS queue_history (
+  id              VARCHAR(32)  NOT NULL PRIMARY KEY,
+  queue_entry_id  VARCHAR(32)  NOT NULL,
+  group_id        VARCHAR(32)  NOT NULL,
+  user_id         VARCHAR(32)  NOT NULL,
+  started_at      DATETIME(3)  NOT NULL,
+  ended_at        DATETIME(3)  NOT NULL,
+  wait_sec        INT          NOT NULL,
+  outcome         VARCHAR(32)  NOT NULL,
+  KEY idx_qh_group_ended (group_id, ended_at),
+  KEY idx_qh_ended (ended_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS pool_settings (
@@ -144,5 +161,6 @@ INSERT INTO pool_settings (`key`, value, updated_at) VALUES
   ('offer_ttl_sec', '60', NOW(3)),
   ('ticket_ttl_sec', '120', NOW(3)),
   ('linger_hint_ttl_sec', '1800', NOW(3)),
-  ('linger_offer_scan_sec', '20', NOW(3))
+  ('linger_offer_scan_sec', '20', NOW(3)),
+  ('queue_heartbeat_ttl_sec', '45', NOW(3))
 ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = VALUES(updated_at);

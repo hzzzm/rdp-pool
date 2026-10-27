@@ -18,9 +18,10 @@ type Config struct {
 	HeartbeatInterval time.Duration
 	LeaseTTL          time.Duration
 	MaxOccupationTTL  time.Duration
-	OfferTTL          time.Duration
-	TicketTTL         time.Duration
-	LingerOfferScan   time.Duration
+	OfferTTL            time.Duration
+	TicketTTL           time.Duration
+	LingerOfferScan     time.Duration
+	QueueHeartbeatTTL   time.Duration
 }
 
 func Load() Config {
@@ -39,6 +40,7 @@ func Load() Config {
 		OfferTTL:          durationSec("OFFER_TTL_SEC", 60),
 		TicketTTL:         durationSec("TICKET_TTL_SEC", 120),
 		LingerOfferScan:   durationSec("LINGER_OFFER_SCAN_SEC", 20),
+		QueueHeartbeatTTL: durationSec("QUEUE_HEARTBEAT_TTL_SEC", 45),
 	}
 }
 
